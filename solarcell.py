@@ -3,7 +3,7 @@ from warnings import warn
 
 import numpy
 from scipy import constants
-from scipy.optimize import least_squares, minimize, root_scalar
+from scipy.optimize import least_squares, minimize_scalar, root_scalar
 
 
 def _warn_solution(name, target, result, threshold=0.02):
@@ -13,8 +13,7 @@ def _warn_solution(name, target, result, threshold=0.02):
         wmsg1 = wmsg1.format(name, err * 100, threshold * 100)
         wmsg2 = "Target={:0.3f}, Result={:0.3f}, Delta={:0.3f}"
         wmsg2 = wmsg2.format(target, result, result - target)
-        msg = " ".join([wmsg1, wmsg2])
-        warn(msg)
+        warn(" ".join([wmsg1, wmsg2]))
 
 
 _metrics = namedtuple("metrics", "isc voc imp vmp pmp vi iv pv")
@@ -33,8 +32,8 @@ class array:
         self.imp = imp
         self.vmp = vmp
         self.t = t
-        self.ns = numpy.ceil(ns)
-        self.np = numpy.ceil(np)
+        self.ns = numpy.ceil(ns)  # Round up to nearest integer.
+        self.np = numpy.ceil(np)  # Round up to nearest integer.
 
     def params(self, t, g):
         assert t > -273.15, "Temperature must exceed absolute zero."
@@ -50,45 +49,41 @@ class array:
         return isc, voc, imp, vmp
 
     def cell(self, t, g):
-        isc, voc, imp, vmp = self.params(t, g)
-        pmp = imp * vmp
-
+        # Skip the curve fit altogether if the cell is dark.
         if g == 0:
             xvi = lambda i: numpy.nan if i < 0 else 0  # Blocking diode.
             xiv = lambda v: numpy.inf if v < 0 else 0  # Bypass diode.
             xpv = lambda v: v * xiv(v)
-            return _metrics(isc, voc, imp, vmp, pmp, xvi, xiv, xpv)
+            return _metrics(0, 0, 0, 0, 0, xvi, xiv, xpv)
 
+        # Otherwise proceed with the curve fit to the following parameters.
+        isc, voc, imp, vmp = self.params(t, g)
+        pmp = imp * vmp
         q_kT = constants.e / (constants.k * (t + 273.15))
 
         def x2eqn(x):
-            # Diode model is a logarithmic function, V=F(I).
             i0, rs, n = x  # Parameters to be solved for numerically.
             i0 = i0 * 1e-20  # Scale factor to assist solver.
-            q_nkT = q_kT / n
 
             def v(i):
+                # Diode model: voltage is a logarithmic function of current.
                 with numpy.errstate(invalid="ignore"):
-                    vraw = numpy.log((isc - i) / i0 + 1) / q_nkT - i * rs
-                    vraw = numpy.nan_to_num(vraw)  # Bypass diode.
-                    vraw = numpy.where(i < 0, numpy.nan, vraw)  # Blocking diode.
-                    return vraw
+                    v = numpy.log((isc - i) / i0 + 1) / (q_kT / n) - i * rs
+                    v = numpy.nan_to_num(v)  # Bypass diode.
+                    v = numpy.where(i < 0, numpy.nan, v)  # Blocking diode.
+                    return v
 
             return v
 
         def x2params(x):
             # Numerically invert the diode model to solve for Isc/Imp.
-            v = x2eqn(x)
-            risc = root_scalar(f=v, x0=isc, bracket=(isc * 0.98, isc))
-            rimp = minimize(
-                fun=lambda ximp: 1 / (ximp * v(ximp)),
-                x0=isc / 2,
-                bounds=[(0, isc * 0.99)],
-            )
-            assert risc.converged and rimp.success
-
             # Return the cell parameters: (xisc, xvoc, ximp, xvmp).
-            return risc.root, v(0), rimp.x[0], v(rimp.x[0])
+            v = x2eqn(x)
+            pinv = lambda i: 1 / (i * v(i))
+            risc = root_scalar(f=v, x0=isc, bracket=(isc * 0.98, isc))
+            rimp = minimize_scalar(fun=pinv, bounds=(0, isc * 0.99))
+            assert risc.converged and rimp.success
+            return risc.root, v(0), rimp.x, v(rimp.x)
 
         def minfun(x):
             # The IV-curve is optimized againt Voc, Vmp, and Pmp.
