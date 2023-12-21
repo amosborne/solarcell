@@ -39,4 +39,4 @@ A numeric optimization procedure is used to best fit the classic photovoltaic ce
 
 When computing a curve, the provided temperature and intensity may be in the form of a single-value (one for the entire array), a one-dimensional array-like of values (one for each string), or a two-dimensional array-like of values (one for each cell, strings by the second dimension). It is possible to put strings of different lengths in parallel by assigning the intensity of excess cells to zero. Requesting a temperature below absolute zero or an intensity less than zero will raise an error.
 
-IV- and PV- curve functions return a single value when provided a single value as an input. If given a one-dimensional array-like as an input, a one-dimensional Numpy array of the same size is returned. Requesting a result for a voltage that is outside of the (0, Voc) range will raise an error.
+IV- and PV- curve functions return a single value when provided a single value as an input. If given a one-dimensional array-like as an input, a one-dimensional Numpy array of the same size is returned.
