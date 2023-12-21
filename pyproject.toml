@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "solarcell"
+version = "0.1.0"
+description = "Estimate IV- and PV-curves given photovoltaic cell datasheet parameters."
+authors = ["Alexander Osborne <alex@osborneee.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/amosborne/solarcell"
+classifiers = ["Topic :: Scientific/Engineering"]
+keywords = ["solar", "photovoltaic"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+[tool.poetry.group.dev.dependencies]
+jupyterlab = "^4.0.9"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
