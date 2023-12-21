@@ -11,9 +11,12 @@ keywords = ["solar", "photovoltaic"]
 
 [tool.poetry.dependencies]
 python = "^3.11"
+numpy = "^1.26.2"
+scipy = "^1.11.4"
 
 [tool.poetry.group.dev.dependencies]
 jupyterlab = "^4.0.9"
+matplotlib = "^3.8.2"
 
 [build-system]
 requires = ["poetry-core"]
