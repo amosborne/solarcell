@@ -41,7 +41,7 @@ ax0.plot(v, curve.iv(v)), ax0.grid()
 ax1.plot(v, curve.pv(v)), ax1.grid()
 ```
 
-![solarcell example](https://github.com/amosborne/solarcell/readme.png)
+![solarcell example](https://raw.githubusercontent.com/amosborne/solarcell/main/examples/readme.png)
 
 ## Background
 
