@@ -48,3 +48,19 @@ def test_solution(array):
     array.cell(t=-180, g=1)
     array.cell(t=220, g=0.1)
     array.cell(t=-180, g=0.1)
+
+
+def test_curve(array):
+    cell = array.cell(t=60, g=1)
+
+    # Fully illuminated.
+    curve = array.curve(t=60, g=1)
+    assert pytest.approx(curve.pmp, rel=1e-3) == cell.pmp * array.ns * array.np
+    assert pytest.approx(curve.isc, rel=1e-3) == cell.isc * array.np
+    assert pytest.approx(curve.voc, rel=1e-3) == cell.voc * array.ns
+
+    # Half illuminated.
+    curve = array.curve(t=60, g=[1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0])
+    assert pytest.approx(curve.pmp, rel=1e-3) == cell.pmp * array.ns * array.np / 2
+    assert pytest.approx(curve.isc, rel=1e-3) == cell.isc * array.np / 2
+    assert pytest.approx(curve.voc, rel=1e-3) == cell.voc * array.ns

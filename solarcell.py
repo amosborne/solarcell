@@ -1,4 +1,5 @@
 from collections import namedtuple
+from functools import partial
 from warnings import warn
 
 import numpy
@@ -16,7 +17,23 @@ def _warn_solution(name, target, result, threshold=0.02):
         warn(" ".join([wmsg1, wmsg2]))
 
 
-_metrics = namedtuple("metrics", "isc voc imp vmp pmp vi iv pv")
+def _metrics(i, v):
+    # Given current increasing from 0 to Isc and corresponding voltages.
+    # Returns namedtuple: (isc, voc, imp, vmp, pmp, vi, iv, pi, pv)
+    m = namedtuple("_metrics", "isc voc imp vmp pmp vi iv pi pv")
+    vi = partial(numpy.interp, xp=i, fp=v, left=numpy.nan, right=0)
+    iv = partial(numpy.interp, xp=v[::-1], fp=i[::-1], left=numpy.inf, right=0)
+    return m(
+        isc=i[-1],  # Short-circuit current.
+        voc=v[0],  # Open-circuit voltage.
+        imp=i[numpy.argmax(i * v)],  # Max-power current.
+        vmp=v[numpy.argmax(i * v)],  # Max-power voltage.
+        pmp=numpy.max(i * v),  # Max-power power.
+        vi=vi,  # Function, current to voltage.
+        iv=iv,  # Function, voltage to current.
+        pi=lambda i: i * vi(i),  # Function, current to power.
+        pv=lambda v: v * iv(v),  # Function, voltage to power.
+    )
 
 
 class array:
@@ -32,8 +49,8 @@ class array:
         self.imp = imp
         self.vmp = vmp
         self.t = t
-        self.ns = numpy.ceil(ns)  # Round up to nearest integer.
-        self.np = numpy.ceil(np)  # Round up to nearest integer.
+        self.ns = int(numpy.ceil(ns))  # Round up to nearest integer.
+        self.np = int(numpy.ceil(np))  # Round up to nearest integer.
 
     def params(self, t, g):
         assert t > -273.15, "Temperature must exceed absolute zero."
@@ -51,15 +68,10 @@ class array:
     def cell(self, t, g):
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
-            xvi = lambda i: numpy.nan if i < 0 else 0  # Blocking diode.
-            xiv = lambda v: numpy.inf if v < 0 else 0  # Bypass diode.
-            xpv = lambda v: v * xiv(v)
-            return _metrics(0, 0, 0, 0, 0, xvi, xiv, xpv)
+            return _metrics(numpy.array([0]), numpy.array([0]))
 
         # Otherwise proceed with the curve fit to the following parameters.
         isc, voc, imp, vmp = self.params(t, g)
-        pmp = imp * vmp
-        q_kT = constants.e / (constants.k * (t + 273.15))
 
         def x2eqn(x):
             i0, rs, n = x  # Parameters to be solved for numerically.
@@ -68,6 +80,7 @@ class array:
             def v(i):
                 # Diode model: voltage is a logarithmic function of current.
                 with numpy.errstate(invalid="ignore"):
+                    q_kT = constants.e / (constants.k * (t + 273.15))
                     v = numpy.log((isc - i) / i0 + 1) / (q_kT / n) - i * rs
                     v = numpy.nan_to_num(v)  # Bypass diode.
                     v = numpy.where(i < 0, numpy.nan, v)  # Blocking diode.
@@ -88,7 +101,7 @@ class array:
         def minfun(x):
             # The IV-curve is optimized againt Voc, Vmp, and Pmp.
             _, xvoc, ximp, xvmp = x2params(x)
-            return voc - xvoc, vmp - xvmp, pmp - (ximp * xvmp)
+            return voc - xvoc, vmp - xvmp, imp * vmp - ximp * xvmp
 
         with numpy.errstate(all="ignore"):
             result = least_squares(
@@ -107,15 +120,58 @@ class array:
         _warn_solution("Imp", imp, ximp)
         _warn_solution("Vmp", vmp, xvmp)
 
-        # Interpolate over voltage.
-        xvi = lambda i: x2eqn(result.x)(i)
-        i = numpy.linspace(0, xisc, 1000)
-        xv = numpy.linspace(0, xvoc, 1000)
-        xi = numpy.interp(xv, xvi(i)[::-1], i[::-1])
-        xiv = lambda v: numpy.interp(v, xv, xi, left=numpy.inf, right=0)
-        xpv = lambda v: v * xiv(v)
-
-        return _metrics(xisc, xvoc, ximp, xvmp, ximp * xvmp, xvi, xiv, xpv)
+        xi = numpy.linspace(0, xisc, 1000)
+        xv = x2eqn(result.x)(xi)
+        return _metrics(xi, xv)
 
     def curve(self, t, g):
-        pass
+        # Create an array of size (ns, np) with elements (t, g).
+        def repmat(arr):
+            arr = numpy.array(arr)
+            if arr.size == 1:
+                arr = numpy.full((self.ns, self.np), arr)
+            elif arr.shape == (self.np,):
+                arr = numpy.tile(arr, (self.ns, 1))
+            elif arr.shape == (self.ns * self.np,):
+                arr = numpy.reshape(arr, (self.ns, self.np))
+            elif arr.shape == (self.ns, self.np):
+                pass
+            else:
+                emsg = "Input cannot be cast into (ns, np) shape."
+                raise UserWarning(emsg)
+
+            return arr
+
+        # Compute cell-level metrics. Columns are strings.
+        t, g = repmat(t), repmat(g)
+        tgs = set(list(zip(t.flat, g.flat)))
+        cell_metrics = dict()
+        for tx, gx in tgs:
+            cell_metrics[(tx, gx)] = self.cell(tx, gx)
+
+        # All series cells in a string have equal current.
+        # The short-circuit current of the string is of the greatest cell.
+        # Compute the string voltage by interpolating over string current.
+        isc = [0] * self.np
+        for s, p in numpy.ndindex((self.ns, self.np)):
+            isc[p] = max(cell_metrics[(t[s, p], g[s, p])].isc, isc[p])
+
+        string_metrics = [None] * self.np
+        for p in range(self.np):
+            i = numpy.linspace(0, isc[p], 1000)
+            v = numpy.zeros(i.shape)
+            for s in range(self.ns):
+                v += cell_metrics[(t[s, p], g[s, p])].vi(i)
+
+            string_metrics[p] = _metrics(i, v)
+
+        # All parallel strings in an array have equal voltage.
+        # The open-circuit voltage of the array is of the greatest string.
+        # Compute the array current by interpolating over the array voltage.
+        voc = max([string.voc for string in string_metrics])
+        v = numpy.linspace(0, voc, 1000)
+        i = numpy.zeros(v.shape)
+        for p in range(self.np):
+            i += string_metrics[p].iv(v)
+
+        return _metrics(i[::-1], v[::-1])
