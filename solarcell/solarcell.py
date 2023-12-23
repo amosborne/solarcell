@@ -1,15 +1,15 @@
 from collections import namedtuple
-from functools import partial, wraps, lru_cache
-from warnings import warn
+from functools import lru_cache, partial, wraps
 from inspect import Signature
+from warnings import warn
 
-import numpy
+import numpy as np
 from scipy import constants
 from scipy.optimize import least_squares, minimize_scalar, root_scalar
 
 
 def _warn_solution(name, target, result, threshold=0.02):
-    err = numpy.abs((result - target) / target)
+    err = np.abs((result - target) / target)
     if err > threshold:
         wmsg1 = "{:s} fit error of {:0.1f}% exceeds {:0.1f}% threshold."
         wmsg1 = wmsg1.format(name, err * 100, threshold * 100)
@@ -22,19 +22,20 @@ def _metrics(i, v):
     # Given current increasing from 0 to Isc and corresponding voltages.
     # Returns namedtuple: (isc, voc, imp, vmp, pmp, vi, iv, pi, pv)
     m = namedtuple("_metrics", "isc voc imp vmp pmp vi iv pi pv")
-    vi = partial(numpy.interp, xp=i, fp=v, left=numpy.nan, right=0)
-    iv = partial(numpy.interp, xp=v[::-1], fp=i[::-1], left=numpy.inf, right=0)
+    vi = partial(np.interp, xp=i, fp=v, left=np.nan, right=0)
+    iv = partial(np.interp, xp=v[::-1], fp=i[::-1], left=np.inf, right=0)
     return m(
         isc=i[-1],  # Short-circuit current.
         voc=v[0],  # Open-circuit voltage.
-        imp=i[numpy.argmax(i * v)],  # Max-power current.
-        vmp=v[numpy.argmax(i * v)],  # Max-power voltage.
-        pmp=numpy.max(i * v),  # Max-power power.
+        imp=i[np.argmax(i * v)],  # Max-power current.
+        vmp=v[np.argmax(i * v)],  # Max-power voltage.
+        pmp=np.max(i * v),  # Max-power power.
         vi=vi,  # Function, current to voltage.
         iv=iv,  # Function, voltage to current.
         pi=lambda i: i * vi(i),  # Function, current to power.
         pv=lambda v: v * iv(v),  # Function, voltage to power.
     )
+
 
 def _round_cell_inputs(ttol, gtol):
     # The numerical fitting takes time. A cache is implemented to prevent
@@ -46,38 +47,12 @@ def _round_cell_inputs(ttol, gtol):
             binding = Signature.from_callable(fun).bind(*args, **kwargs)
             t = binding.arguments["t"]
             g = binding.arguments["g"]
-            return fun(args[0], round(t/ttol)*ttol, round(g/gtol)*gtol)
+            return fun(args[0], round(t / ttol) * ttol, round(g / gtol) * gtol)
 
         return wrapper
 
     return decorator
 
-def _string_repmat(arr, ns):
-    assert ns > 0, "There must be atleast one cell per string."
-    ns = int(numpy.ceil(ns))  # Round up to nearest integer.
-    arr = numpy.array(arr)
-    if arr.size == 1:
-        return numpy.full(ns, arr)
-    if arr.size == ns:
-        return numpy.reshape(arr, (ns,)) 
-    raise UserWarning("Cannot cast input into (ns,) shape.")
-
-
-def _array_repmat(arr, ns, np):
-    assert ns > 0, "There must be atleast one cell per string."
-    assert np > 0, "There must be atleast one string per array."
-    ns = int(numpy.ceil(ns))  # Round up to nearest integer.
-    np = int(numpy.ceil(np))  # Round up to nearest integer.
-    arr = numpy.array(arr)
-    if arr.size == 1:
-        return numpy.full((ns, np), arr)
-    if arr.size == np:
-        return numpy.tile(numpy.reshape(arr, (np,)), (ns, 1))
-    if arr.size == ns * np:
-        return numpy.reshape(arr, (ns, np))
-    if arr.shape == (self.ns, self.np):
-        pass
-    raise UserWarning("Cannot cast input into (ns,np) shape.")
 
 class solarcell:
     def __init__(self, isc, voc, imp, vmp, t):
@@ -95,10 +70,10 @@ class solarcell:
     def cell(self, t, g):
         assert t > -273.15, "Temperature must exceed absolute zero."
         assert g >= 0, "Intensity must be non-negative."
-        
+
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
-            return _metrics(numpy.array([0]), numpy.array([0]))
+            return _metrics(np.array([0]), np.array([0]))
 
         # Otherwise proceed with the curve fit to the following parameters.
         # Compute the adjusted cell parameters.
@@ -114,11 +89,11 @@ class solarcell:
 
             def v(i):
                 # Diode model: voltage is a logarithmic function of current.
-                with numpy.errstate(invalid="ignore"):
+                with np.errstate(invalid="ignore"):
                     q_kT = constants.e / (constants.k * (t + 273.15))
-                    v = numpy.log((isc - i) / i0 + 1) / (q_kT / n) - i * rs
-                    v = numpy.nan_to_num(v)  # Bypass diode.
-                    v = numpy.where(i < 0, numpy.nan, v)  # Blocking diode.
+                    v = np.log((isc - i) / i0 + 1) / (q_kT / n) - i * rs
+                    v = np.nan_to_num(v)  # Bypass diode.
+                    v = np.where(i < 0, np.nan, v)  # Blocking diode.
                     return v
 
             return v
@@ -138,7 +113,7 @@ class solarcell:
             _, xvoc, ximp, xvmp = x2params(x)
             return voc - xvoc, vmp - xvmp, imp * vmp - ximp * xvmp
 
-        with numpy.errstate(all="ignore"):
+        with np.errstate(all="ignore"):
             result = least_squares(
                 fun=minfun,
                 x0=(1, 0.1, 2.5),
@@ -155,38 +130,24 @@ class solarcell:
         _warn_solution("Imp", imp, ximp)
         _warn_solution("Vmp", vmp, xvmp)
 
-        xi = numpy.linspace(0, xisc, 1000)
+        xi = np.linspace(0, xisc, 1000)
         xv = x2eqn(result.x)(xi)
         return _metrics(xi, xv)
 
-    def string(self, t, g, ns):
+    def string(self, t, g):
         # All series cells in a string have equal current.
         # The short-circuit current of the string is of the greatest cell.
         # Compute the string voltage by interpolating over string current.
-        t = _string_repmat(t, ns)
-        g = _string_repmat(g, ns)
-        isc = max([self.cell(*tg).isc for tg in zip(t,g)])
-        i = numpy.linspace(0, isc, 1000)
-        v = numpy.sum([self.cell(*tg).vi(i) for tg in zip(t,g)], 0)
+        isc = max([self.cell(*tg).isc for tg in zip(t, g)])
+        i = np.linspace(0, isc, 1000)
+        v = np.sum([self.cell(*tg).vi(i) for tg in zip(t, g)], 0)
         return _metrics(i, v)
 
-    def array(self, t, g, ns, np):
+    def array(self, t, g):
         # All parallel strings in an array have equal voltage.
         # The open-circuit voltage of the array is of the greatest string.
         # Compute the array current by interpolating over the array voltage.
-        t = _array_repmat(t, ns, np)
-        g = _array_repmat(g, ns, np)
-        [self.string(*tg)]
-    
-    def curve(self, t, g):
-        
-
-
-        
-        voc = max([string.voc for string in string_metrics])
-        v = numpy.linspace(0, voc, 1000)
-        i = numpy.zeros(v.shape)
-        for p in range(self.np):
-            i += string_metrics[p].iv(v)
-
+        voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
+        v = np.linspace(0, voc, 1000)
+        i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
         return _metrics(i[::-1], v[::-1])
