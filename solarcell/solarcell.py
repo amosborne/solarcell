@@ -1,6 +1,7 @@
 from collections import namedtuple
-from functools import partial
+from functools import partial, wraps, lru_cache
 from warnings import warn
+from inspect import Signature
 
 import numpy
 from scipy import constants
@@ -35,43 +36,77 @@ def _metrics(i, v):
         pv=lambda v: v * iv(v),  # Function, voltage to power.
     )
 
+def _round_cell_inputs(ttol, gtol):
+    # The numerical fitting takes time. A cache is implemented to prevent
+    # duplicate work. Rounding of temperature and intensity is performed
+    # prior to accessing the cache to increase hit likelihood.
+    def decorator(fun):
+        @wraps(fun)
+        def wrapper(*args, **kwargs):
+            binding = Signature.from_callable(fun).bind(*args, **kwargs)
+            t = binding.arguments["t"]
+            g = binding.arguments["g"]
+            return fun(args[0], round(t/ttol)*ttol, round(g/gtol)*gtol)
 
-class array:
-    def __init__(self, isc, voc, imp, vmp, t, ns, np):
+        return wrapper
+
+    return decorator
+
+def _string_repmat(arr, ns):
+    assert ns > 0, "There must be atleast one cell per string."
+    ns = int(numpy.ceil(ns))  # Round up to nearest integer.
+    arr = numpy.array(arr)
+    if arr.size == 1:
+        return numpy.full(ns, arr)
+    if arr.size == ns:
+        return numpy.reshape(arr, (ns,)) 
+    raise UserWarning("Cannot cast input into (ns,) shape.")
+
+
+def _array_repmat(arr, ns, np):
+    assert ns > 0, "There must be atleast one cell per string."
+    assert np > 0, "There must be atleast one string per array."
+    ns = int(numpy.ceil(ns))  # Round up to nearest integer.
+    np = int(numpy.ceil(np))  # Round up to nearest integer.
+    arr = numpy.array(arr)
+    if arr.size == 1:
+        return numpy.full((ns, np), arr)
+    if arr.size == np:
+        return numpy.tile(numpy.reshape(arr, (np,)), (ns, 1))
+    if arr.size == ns * np:
+        return numpy.reshape(arr, (ns, np))
+    if arr.shape == (self.ns, self.np):
+        pass
+    raise UserWarning("Cannot cast input into (ns,np) shape.")
+
+class solarcell:
+    def __init__(self, isc, voc, imp, vmp, t):
         assert isc[0] > imp[0] and isc[1] > imp[1], "Isc must exceed Imp."
         assert voc[0] > vmp[0] and voc[1] > vmp[1], "Voc must exceed Vmp."
         assert t > -273.15, "Temperature must exceed absolute zero."
-        assert ns > 0, "There must be atleast one cell per string."
-        assert np > 0, "There must be atleast one string per array."
-
         self.isc = isc
         self.voc = voc
         self.imp = imp
         self.vmp = vmp
         self.t = t
-        self.ns = int(numpy.ceil(ns))  # Round up to nearest integer.
-        self.np = int(numpy.ceil(np))  # Round up to nearest integer.
 
-    def params(self, t, g):
+    @_round_cell_inputs(ttol=0.1, gtol=0.01)
+    @lru_cache(maxsize=128)
+    def cell(self, t, g):
         assert t > -273.15, "Temperature must exceed absolute zero."
         assert g >= 0, "Intensity must be non-negative."
+        
+        # Skip the curve fit altogether if the cell is dark.
+        if g == 0:
+            return _metrics(numpy.array([0]), numpy.array([0]))
 
+        # Otherwise proceed with the curve fit to the following parameters.
         # Compute the adjusted cell parameters.
         dt = t - self.t
         isc = (self.isc[0] + dt * self.isc[1]) * g
         voc = self.voc[0] + dt * self.voc[1]
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
-
-        return isc, voc, imp, vmp
-
-    def cell(self, t, g):
-        # Skip the curve fit altogether if the cell is dark.
-        if g == 0:
-            return _metrics(numpy.array([0]), numpy.array([0]))
-
-        # Otherwise proceed with the curve fit to the following parameters.
-        isc, voc, imp, vmp = self.params(t, g)
 
         def x2eqn(x):
             i0, rs, n = x  # Parameters to be solved for numerically.
@@ -124,50 +159,30 @@ class array:
         xv = x2eqn(result.x)(xi)
         return _metrics(xi, xv)
 
-    def curve(self, t, g):
-        # Create an array of size (ns, np) with elements (t, g).
-        def repmat(arr):
-            arr = numpy.array(arr)
-            if arr.size == 1:
-                arr = numpy.full((self.ns, self.np), arr)
-            elif arr.shape == (self.np,):
-                arr = numpy.tile(arr, (self.ns, 1))
-            elif arr.shape == (self.ns * self.np,):
-                arr = numpy.reshape(arr, (self.ns, self.np))
-            elif arr.shape == (self.ns, self.np):
-                pass
-            else:
-                emsg = "Input cannot be cast into (ns, np) shape."
-                raise UserWarning(emsg)
-
-            return arr
-
-        # Compute cell-level metrics. Columns are strings.
-        t, g = repmat(t), repmat(g)
-        tgs = set(list(zip(t.flat, g.flat)))
-        cell_metrics = dict()
-        for tx, gx in tgs:
-            cell_metrics[(tx, gx)] = self.cell(tx, gx)
-
+    def string(self, t, g, ns):
         # All series cells in a string have equal current.
         # The short-circuit current of the string is of the greatest cell.
         # Compute the string voltage by interpolating over string current.
-        isc = [0] * self.np
-        for s, p in numpy.ndindex((self.ns, self.np)):
-            isc[p] = max(cell_metrics[(t[s, p], g[s, p])].isc, isc[p])
+        t = _string_repmat(t, ns)
+        g = _string_repmat(g, ns)
+        isc = max([self.cell(*tg).isc for tg in zip(t,g)])
+        i = numpy.linspace(0, isc, 1000)
+        v = numpy.sum([self.cell(*tg).vi(i) for tg in zip(t,g)], 0)
+        return _metrics(i, v)
 
-        string_metrics = [None] * self.np
-        for p in range(self.np):
-            i = numpy.linspace(0, isc[p], 1000)
-            v = numpy.zeros(i.shape)
-            for s in range(self.ns):
-                v += cell_metrics[(t[s, p], g[s, p])].vi(i)
-
-            string_metrics[p] = _metrics(i, v)
-
+    def array(self, t, g, ns, np):
         # All parallel strings in an array have equal voltage.
         # The open-circuit voltage of the array is of the greatest string.
         # Compute the array current by interpolating over the array voltage.
+        t = _array_repmat(t, ns, np)
+        g = _array_repmat(g, ns, np)
+        [self.string(*tg)]
+    
+    def curve(self, t, g):
+        
+
+
+        
         voc = max([string.voc for string in string_metrics])
         v = numpy.linspace(0, voc, 1000)
         i = numpy.zeros(v.shape)
