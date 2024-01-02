@@ -13,6 +13,7 @@ keywords = ["solar", "photovoltaic"]
 python = "^3.11"
 numpy = "^1.26.2"
 scipy = "^1.11.4"
+mystic = "^0.4.1"
 
 [tool.poetry.group.dev.dependencies]
 jupyterlab = "^4.0.9"
