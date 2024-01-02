@@ -5,7 +5,8 @@ from warnings import warn
 
 import numpy as np
 from scipy import constants
-from scipy.optimize import least_squares, minimize_scalar, root_scalar
+from scipy.optimize import least_squares, root_scalar
+from scipy.special import lambertw
 
 
 def _warn_solution(name, target, result, threshold=0.02):
@@ -18,10 +19,13 @@ def _warn_solution(name, target, result, threshold=0.02):
         warn(" ".join([wmsg1, wmsg2]))
 
 
-def _metrics(i, v):
-    # Given current increasing from 0 to Isc and corresponding voltages.
-    # Returns namedtuple: (isc, voc, imp, vmp, pmp, vi, iv, pi, pv)
-    m = namedtuple("_metrics", "isc voc imp vmp pmp vi iv pi pv")
+def _metrics(isc, voc, imp, vmp, iv, vi):
+    m = namedtuple("_metrics", "isc voc imp vmp iv vi pmp pv pi")
+    pmp = imp * vmp
+    pv = lambda v: v * iv(v)
+    pi = lambda i: i + vi(i)
+    return m(isc, voc, imp, vmp, iv, vi, pmp, pv, pi)
+    
     vi = partial(np.interp, xp=i, fp=v, left=np.nan, right=0)
     iv = partial(np.interp, xp=v[::-1], fp=i[::-1], left=np.inf, right=0)
     return m(
@@ -36,23 +40,58 @@ def _metrics(i, v):
         pv=lambda v: v * iv(v),  # Function, voltage to power.
     )
 
+def _model(iph, i0, rs, rsh, n, t):
+    # See the technical reference: "Exact analytical solutions of the parameters
+    # of real solar cells using Lambert W-function," Amit Jain, Avinashi Kapoor (2003).
+    
+    nvth = n * constants.k * (t + 273.15) / constants.e
+    rtot = rs + rsh
+    itot = iph + i0
 
-def _round_cell_inputs(ttol, gtol):
-    # The numerical fitting takes time. A cache is implemented to prevent
-    # duplicate work. Rounding of temperature and intensity is performed
-    # prior to accessing the cache to increase hit likelihood.
-    def decorator(fun):
-        @wraps(fun)
-        def wrapper(*args, **kwargs):
-            binding = Signature.from_callable(fun).bind(*args, **kwargs)
-            t = binding.arguments["t"]
-            g = binding.arguments["g"]
-            return fun(args[0], round(t / ttol) * ttol, round(g / gtol) * gtol)
+    def iv(v):
+        # equation #2 from the technical reference
+        ex = rsh * (rs * itot + v) / nvth / rtot
+        wf = rs * rsh * i0 * np.exp(ex) / nvth / rtot
+        lm = np.real_if_close(lambertw(wf))
+        return (rsh * itot - v) / rtot - lm * nvth / rs
 
-        return wrapper
+    def vi(i):
+        # equation #3 from the technical reference
+        ex = rsh * (itot - i) / nvth
+        wf = rsh * i0 * np.exp(ex) / nvth
+        lm = np.real_if_close(lambertw(wf))
+        return rsh * itot - rtot * i - lm * nvth
 
-    return decorator
+    def dpdi(i):
+        # equation #10 from the technical reference
+        ex = rsh * (itot - i) / nvth
+        wf = rsh * i0 * np.exp(ex) / nvth
+        lm = np.real_if_close(lambertw(wf))
+        t1 = rsh * itot - rtot * i - lm * nvth
+        t2 = i * (lm * rsh / (1 + lm) - rtot)
+        return t1 + t2
 
+    def dpdv(v):
+        # equation #11 from the technical reference
+        ex = rsh * (rs * itot + v) / nvth / rtot
+        wf = rs * rsh * i0 * np.exp(ex) / nvth / rtot
+        lm = np.real_if_close(lambertw(wf))
+        t1 = (rsh * itot - v) / rtot - lm * nvth / rs
+        t2 = v * (1 / rtot + lm * rsh / (1 + lm) / rtot / rs)
+        return t1 - t2
+
+    def root(f, bnd):
+        try:
+            result = root_scalar(f, bracket=(0, bnd))
+        except ValueError:
+            return np.nan
+        else:
+            return result.root if result.converged else np.nan
+
+    imp = root(dpdi, isc:=iv(0))
+    vmp = root(dpdv, voc:=vi(0))
+    
+    return isc, voc, imp, vmp, iv, vi
 
 class solarcell:
     def __init__(self, isc, voc, imp, vmp, t):
@@ -65,15 +104,14 @@ class solarcell:
         self.vmp = vmp
         self.t = t
 
-    @_round_cell_inputs(ttol=0.1, gtol=0.01)
-    @lru_cache(maxsize=128)
     def cell(self, t, g):
         assert t > -273.15, "Temperature must exceed absolute zero."
         assert g >= 0, "Intensity must be non-negative."
 
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
-            return _metrics(np.array([0]), np.array([0]))
+            null = lambda _: 0
+            return _metrics(0,0,0,0,null,null)
 
         # Otherwise proceed with the curve fit to the following parameters.
         # Compute the adjusted cell parameters.
@@ -83,56 +121,41 @@ class solarcell:
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
 
-        def x2eqn(x):
-            i0, rs, n = x  # Parameters to be solved for numerically.
-            i0 = i0 * 1e-20  # Scale factor to assist solver.
+        print("goal:", isc, voc, imp, vmp)
 
-            def v(i):
-                # Diode model: voltage is a logarithmic function of current.
-                with np.errstate(invalid="ignore"):
-                    q_kT = constants.e / (constants.k * (t + 273.15))
-                    v = np.log((isc - i) / i0 + 1) / (q_kT / n) - i * rs
-                    v = np.nan_to_num(v)  # Bypass diode.
-                    v = np.where(i < 0, np.nan, v)  # Blocking diode.
-                    return v
+        def params(x):
+            iph, irel0, rs, rsh, n = x
+            with np.errstate(invalid="ignore"):
+                return _model(iph, irel0 * 1e-20, rs, rsh, n, t)
+            
+        def params_relerror(x):
+            xisc, xvoc, ximp, xvmp, _, _ = params(x)
+            isc_relerror = (isc - xisc) / isc
+            voc_relerror = (voc - xvoc) / voc
+            imp_relerror = (imp - ximp) / imp
+            vmp_relerror = (vmp - xvmp) / vmp
+            return isc - xisc, voc - xvoc, imp - ximp, vmp - xvmp
+            return isc_relerror, voc_relerror, imp_relerror, vmp_relerror
 
-            return v
+        rs0 = (voc - vmp) / imp
+        rsh0 = vmp / (isc - imp)
+        x0 = (isc, 1, rs0, rsh0, 2.5) # iph, irel0, rs, rsh, n
+        lb = (isc * 0.95, 1e-3, 0, 10, 0.1)
+        ub = (isc * 1.05, 1e3, 1, np.inf, 10)
 
-        def x2params(x):
-            # Numerically invert the diode model to solve for Isc/Imp.
-            # Return the cell parameters: (xisc, xvoc, ximp, xvmp).
-            v = x2eqn(x)
-            pinv = lambda i: 1 / (i * v(i))
-            risc = root_scalar(f=v, x0=isc, bracket=(isc * 0.98, isc))
-            rimp = minimize_scalar(fun=pinv, bounds=(0, isc * 0.99))
-            assert risc.converged and rimp.success
-            return risc.root, v(0), rimp.x, v(rimp.x)
-
-        def minfun(x):
-            # The IV-curve is optimized againt Voc, Vmp, and Pmp.
-            _, xvoc, ximp, xvmp = x2params(x)
-            return voc - xvoc, vmp - xvmp, imp * vmp - ximp * xvmp
-
-        with np.errstate(all="ignore"):
-            result = least_squares(
-                fun=minfun,
-                x0=(1, 0.1, 2.5),
-                bounds=((1e-3, 0, 0.1), (1e3, 1, 10)),
-                xtol=None,
-            )
-        emsg = "Curve fit failed for cell(t={:0.1f}, g={:0.2f})."
-        assert result.success and result.cost < 0.01, emsg.format(t, g)
+        result = least_squares(params_relerror, x0, bounds=(lb, ub))
+        print(result)
+        assert result.success
 
         # Warn if the solution is a poor fit.
-        xisc, xvoc, ximp, xvmp = x2params(result.x)
+        xisc, xvoc, ximp, xvmp, _, _ = params(result.x)
+        print("result:", xisc, xvoc, ximp, xvmp)
         _warn_solution("Isc", isc, xisc)
         _warn_solution("Voc", voc, xvoc)
         _warn_solution("Imp", imp, ximp)
         _warn_solution("Vmp", vmp, xvmp)
 
-        xi = np.linspace(0, xisc, 1000)
-        xv = x2eqn(result.x)(xi)
-        return _metrics(xi, xv)
+        return _metrics(*params(result.x))
 
     def string(self, t, g):
         # All series cells in a string have equal current.
@@ -141,7 +164,15 @@ class solarcell:
         isc = max([self.cell(*tg).isc for tg in zip(t, g)])
         i = np.linspace(0, isc, 1000)
         v = np.sum([self.cell(*tg).vi(i) for tg in zip(t, g)], 0)
-        return _metrics(i, v)
+        
+        voc = v[0]
+        imp = i[np.argmax(i * v)]
+        vmp = v[np.argmax(i * v)]
+        
+        iv = partial(np.interp, xp=v[::-1], fp=i[::-1], left=np.inf, right=0)
+        vi = partial(np.interp, xp=i, fp=v, left=np.nan, right=0)
+        
+        return _metrics(isc, voc, imp, vmp, iv, vi)
 
     def array(self, t, g):
         # All parallel strings in an array have equal voltage.
@@ -150,4 +181,12 @@ class solarcell:
         voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
         v = np.linspace(0, voc, 1000)
         i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
-        return _metrics(i[::-1], v[::-1])
+
+        isc = i[0]
+        imp = i[np.argmax(i * v)]
+        vmp = v[np.argmax(i * v)]
+        
+        iv = partial(np.interp, xp=v[::-1], fp=i[::-1], left=np.inf, right=0)
+        vi = partial(np.interp, xp=i, fp=v, left=np.nan, right=0)
+        
+        return _metrics(isc, voc, imp, vmp, iv, vi)
