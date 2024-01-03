@@ -44,8 +44,6 @@ def test_cell(azur3g30a):
     assert cell.vi(cell.isc + 1) == 0  # no voltage when bypassed
     assert np.isnan(cell.vi(-1))  # blocked current when injected
 
-
-@pytest.mark.filterwarnings("ignore::UserWarning")
 def test_solution(azur3g30a):
     azur3g30a.cell(t=150, g=1)
     azur3g30a.cell(t=-150, g=1)

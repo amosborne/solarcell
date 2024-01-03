@@ -14,12 +14,21 @@ from scipy.special import lambertw
 from mystic.strategy import RandToBest1Bin
 
 
-def _metrics(isc, voc, imp, vmp, iv, vi):
-    m = namedtuple("_metrics", "isc voc imp vmp iv vi pmp pv pi")
-    pmp = imp * vmp
-    pv = lambda v: v * iv(v)
-    pi = lambda i: i + vi(i)
-    return m(isc, voc, imp, vmp, iv, vi, pmp, pv, pi)
+class _metrics:
+    def __init__(self, isc, voc, imp, vmp, iv, vi):
+        self.isc = isc
+        self.voc = voc
+        self.imp = imp
+        self.vmp = vmp
+        self.iv = iv
+        self.vi = vi
+        self.pmp = imp * vmp
+        self.pv = lambda v: v * iv(v)
+        self.pi = lambda i: i + vi(i)
+
+    def __repr__(self):
+        fs = "isc={:0.4g}, voc={:0.4g}, imp={:0.4g}, vmp={:0.4g}, pmp={:0.4g}"
+        return fs.format(self.isc, self.voc, self.imp, self.vmp, self.pmp)
 
 
 def _round_cell_inputs(ttol, gtol):
@@ -47,6 +56,7 @@ def _model(iph, i0, rs, rsh, n, t):
     rtot = rs + rsh
     itot = iph + i0
 
+    @np.errstate(invalid="ignore", over="ignore")
     def iv(v):
         # equation #2 from the technical reference
         ex = rsh * (rs * itot + v) / nvth / rtot
@@ -56,6 +66,7 @@ def _model(iph, i0, rs, rsh, n, t):
         ret = np.clip(ret, a_min=0, a_max=None)  # blocking diode
         return np.where(v < 0, np.inf, ret)  # bypass diode
 
+    @np.errstate(invalid="ignore", over="ignore")
     def vi(i):
         # equation #3 from the technical reference
         ex = rsh * (itot - i) / nvth
@@ -65,6 +76,7 @@ def _model(iph, i0, rs, rsh, n, t):
         ret = np.clip(ret, a_min=0, a_max=None)  # bypass diode
         return np.where(i < 0, np.nan, ret)  # blocking diode
 
+    @np.errstate(invalid="ignore", over="ignore")
     def dpdi(i):
         # equation #10 from the technical reference
         ex = rsh * (itot - i) / nvth
@@ -74,6 +86,7 @@ def _model(iph, i0, rs, rsh, n, t):
         t2 = i * (lm * rsh / (1 + lm) - rtot)
         return t1 + t2
 
+    @np.errstate(invalid="ignore", over="ignore")
     def dpdv(v):
         # equation #11 from the technical reference
         ex = rsh * (rs * itot + v) / nvth / rtot
@@ -118,8 +131,9 @@ class solarcell:
 
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
-            null = lambda _: 0
-            return _metrics(0, 0, 0, 0, null, null)
+            iv = lambda v: np.where(v < 0, np.inf, 0)
+            vi = lambda i: np.where(i < 0, np.nan, 0)
+            return _metrics(0, 0, 0, 0, iv, vi)
 
         # Otherwise proceed with the curve fit to the following parameters.
         dt = t - self.t
@@ -130,8 +144,7 @@ class solarcell:
 
         def model(x):
             irelph, irel0, rs, rsh, n = x
-            with np.errstate(invalid="ignore", over="ignore"):
-                return _model(irelph * isc, irel0 * 1e-20, rs, rsh, n, t)
+            return _model(irelph * isc, irel0 * 1e-20, rs, rsh, n, t)
 
         def cost(x):
             target = (isc, voc, imp, vmp)
@@ -139,32 +152,15 @@ class solarcell:
             errors = list(starmap(relerror, zip(model(x), target)))
             errors = np.nan_to_num(errors, nan=np.nan, posinf=1e16, neginf=-1e16)
             return errors
-            # rss = np.sqrt(np.sum(np.array(errors) ** 2))
-            # return rss
 
         x0 = (1.0, 1e0, 0, 1e0, 2.5)
         lb = (0.9, 1e-3, 0, 1e0, 0.1)
         ub = (1.1, 1e3, 1, 1e4, 9.9)
 
         result = least_squares(cost, x0, bounds=(lb, ub))
-        rss = np.sqrt(result.cost)
+        rss = np.sqrt(2 * result.cost)
         emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
         assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
-        
-        
-        # result = diffev2(
-        #     cost=cost,
-        #     x0=x0,
-        #     npop=40,
-        #     bounds=tuple(zip(lb, ub)),
-        #     ftol=self.rss,
-        #     strategy=RandToBest1Bin,
-        #     disp=False,
-        # ) # optimize by non-deterministic differential evolution procedure
-
-        # rss = cost(result)
-        # emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
-        # assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
 
         return _metrics(*model(result.x))
 
@@ -173,9 +169,9 @@ class solarcell:
         # The short-circuit current of the string is of the greatest cell.
         # Compute the string voltage by interpolating over string current.
         isc = max([self.cell(*tg).isc for tg in zip(t, g)])
-
         i = np.linspace(0, isc, 1000)
         v = np.sum([self.cell(*tg).vi(i) for tg in zip(t, g)], 0)
+        v[-1] = 0  # guarantee the (isc, 0) point for interpolation
 
         voc = v[0]
         imp = i[np.argmax(i * v)]
@@ -193,6 +189,7 @@ class solarcell:
         voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
         v = np.linspace(0, voc, 1000)
         i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
+        i[-1] = 0 # guarantee the (0, voc) point for interpolation
 
         isc = i[0]
         imp = i[np.argmax(i * v)]
