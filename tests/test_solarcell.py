@@ -15,8 +15,10 @@ def azur3g30a():
         t=28,
     )
 
+
 def gtapprox(gt, lt, rel):
     return pytest.approx(gt, rel) == lt or gt > lt
+
 
 def test_dark_cell(azur3g30a):
     cell = azur3g30a.cell(t=28, g=0)
@@ -43,6 +45,7 @@ def test_cell(azur3g30a):
     assert np.isneginf(cell.pv(-1))  # bypass current when reversed
     assert cell.vi(cell.isc + 1) == 0  # no voltage when bypassed
     assert np.isnan(cell.vi(-1))  # blocked current when injected
+
 
 def test_solution(azur3g30a):
     azur3g30a.cell(t=150, g=1)

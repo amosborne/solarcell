@@ -1,17 +1,11 @@
-from collections import namedtuple
 from functools import lru_cache, partial, wraps
 from inspect import Signature
 from itertools import starmap
-from warnings import warn
 
 import numpy as np
-from mystic.monitors import VerboseMonitor
-from mystic.solvers import diffev2
 from scipy import constants
 from scipy.optimize import least_squares, root_scalar
 from scipy.special import lambertw
-
-from mystic.strategy import RandToBest1Bin
 
 
 class _metrics:
@@ -112,7 +106,8 @@ def _model(iph, i0, rs, rsh, n, t):
 
 class solarcell:
     rss = 0.05  # the RSS error threshold at which the fit fails
-    
+    nsamp = 1000  # number of samples used to interpolate curves
+
     def __init__(self, isc, voc, imp, vmp, t):
         assert isc[0] > imp[0] and isc[1] > imp[1], "Isc must exceed Imp."
         assert voc[0] > vmp[0] and voc[1] > vmp[1], "Voc must exceed Vmp."
@@ -169,7 +164,7 @@ class solarcell:
         # The short-circuit current of the string is of the greatest cell.
         # Compute the string voltage by interpolating over string current.
         isc = max([self.cell(*tg).isc for tg in zip(t, g)])
-        i = np.linspace(0, isc, 1000)
+        i = np.linspace(0, isc, self.nsamp)
         v = np.sum([self.cell(*tg).vi(i) for tg in zip(t, g)], 0)
         v[-1] = 0  # guarantee the (isc, 0) point for interpolation
 
@@ -187,9 +182,9 @@ class solarcell:
         # The open-circuit voltage of the array is of the greatest string.
         # Compute the array current by interpolating over the array voltage.
         voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
-        v = np.linspace(0, voc, 1000)
+        v = np.linspace(0, voc, self.nsamp)
         i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
-        i[-1] = 0 # guarantee the (0, voc) point for interpolation
+        i[-1] = 0  # guarantee the (0, voc) point for interpolation
 
         isc = i[0]
         imp = i[np.argmax(i * v)]
