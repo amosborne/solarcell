@@ -4,7 +4,7 @@ from itertools import starmap
 
 import numpy as np
 from scipy import constants
-from scipy.optimize import least_squares, root_scalar
+from scipy.optimize import least_squares, root_scalar, brute, minimize
 from scipy.special import lambertw
 
 
@@ -136,49 +136,76 @@ class solarcell:
         voc = self.voc[0] + dt * self.voc[1]
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
-        target = np.array((isc, voc, imp, vmp, imp * vmp))
+        target = (isc, voc, imp, vmp)
 
         def model(x):
-            irelph, irel0, rsexp, rshexp, n = x
+            irelph, irel0, rs, rshexp, n = x
             return _model(
-                iph=isc * (1 + 10 ** -irelph),
+                iph=isc * (1 + 10 ** irelph),
                 i0=isc * (10 ** irel0),
-                rs=10 ** rsexp,
+                rs=rs,
                 rsh=10 ** rshexp,
                 n=n,
                 t=t,
             )
-
-        def cost(x, show=False):
-            m = _metrics(*model(x))
-            actual = (m.isc, m.voc, m.imp, m.vmp, m.pmp)
-            errors = np.subtract(target, actual)
+        
+        def cost(x):
+            errors = np.subtract(target, model(x)[:4])
             errors = np.nan_to_num(errors, nan=1e16, posinf=1e16, neginf=-1e16)
-            return errors
+            rss = np.sqrt(np.sum(np.divide(errors, target) ** 2))
+            return rss
 
-        rsexp0 = np.log10((voc - vmp) / imp)
-        rshexp0 = np.log10(vmp / (isc - imp))
         
-        x0 = (2, -14, rsexp0 - 2, rshexp0 - 2, 3.0)
-        lb = (0, -18, rsexp0 - 4, rshexp0 - 4, 0.1)
-        ub = (3, -10, rsexp0 + 1, rshexp0 + 1, 9.0)
 
-        result = least_squares(cost, x0, bounds=(lb, ub), x_scale=(5, 20, 5, 5, 10))
+        rs0 = 10 ** np.ceil(np.log10((voc - vmp) / imp))
+        rshexp0 = np.floor(np.log10(vmp / (isc - imp)))
+
+        def brutex(x):
+            return (-2, x[0], rs0 * 1e-1, x[1], x[2])  # set iph=isc, rs=0 for brute force
         
-        print("Fit Targets:", _metrics(*target[:-1], None, None))
-        print("Fit Results:", _metrics(*model(result.x)))
-        print("Fit Errors:", cost(result.x))
-        print("Fit Params:", result.x)
-        print("Fit LB:", lb)
-        print("Fit UB:", ub)
-        print("Fit X0:", x0)
-        print("Fit RSS:", np.sqrt(np.sum((cost(result.x) / target)**2)))
+        # x0 = (2, -14, rsexp0 - 2, rshexp0 - 2, 3.0)
+        # lb = (-3, -18, 0, rshexp0 - 2, 0.5)
+        # ub = (-1, -10, rs0, rshexp0 + 1, 7.5)
+        # ranges = tuple(zip(lb, ub))
+
+        lb = (-18, rshexp0 - 2, 0.4)
+        ub = (-9, rshexp0 + 1, 6.4)
+        ranges = tuple(zip(lb, ub))
+        
+        # result = least_squares(cost, x0, bounds=(lb, ub), x_scale=(5, 20, 5, 5, 10))
+        x0 = brute(lambda x: cost(brutex(x)), ranges, Ns=16, finish=None)
+
+        result = _metrics(*model(brutex(x0)))
+        
+        print("BRUTE:")
+        print("Fit Targets:", _metrics(*target, None, None))
+        print("Fit Results:", result)
+        print("Fit RSS:", cost(brutex(x0)))
+        print("Fit UB:", ("{:6.2f} "*3).format(*ub))
+        print("Fit X0:", ("{:6.2f} "*3).format(*x0))
+        print("Fit LB:", ("{:6.2f} "*3).format(*lb))
+
+        lb = (-3, -18, 0, rshexp0 - 2, 0.4)
+        ub = (-1, -9, rs0, rshexp0 + 1, 6.4)
+        ranges = tuple(zip(lb, ub))
+        
+        result = minimize(cost, brutex(x0), bounds=ranges, tol=1e-6)
+        
+        print("POLISH:")
+        print(result)
+        
+
+        result = _metrics(*model(result.x))
+        
+        
+        # print("Fit X0:", x0)
+        # print("Fit RSS:", np.sqrt(np.sum((cost(x0) / target)**2)))
         
         # rss = np.sqrt(2 * result.cost)
         # emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
         # assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
 
-        return _metrics(*model(result.x))
+        return result
 
     def string(self, t, g):
         # All series cells in a string have equal current.
