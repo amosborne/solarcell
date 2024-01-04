@@ -24,6 +24,7 @@ isort = "^5.13.2"
 flake9 = "^3.8.3.post2"
 pytest = "^7.4.3"
 shapely = "^2.0.2"
+worstcase = "^0.5.0"
 
 [build-system]
 requires = ["poetry-core"]

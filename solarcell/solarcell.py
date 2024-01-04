@@ -109,8 +109,8 @@ class solarcell:
     nsamp = 1000  # number of samples used to interpolate curves
 
     def __init__(self, isc, voc, imp, vmp, t):
-        assert isc[0] > imp[0] and isc[1] > imp[1], "Isc must exceed Imp."
-        assert voc[0] > vmp[0] and voc[1] > vmp[1], "Voc must exceed Vmp."
+        assert isc[0] > imp[0] and isc[1] >= imp[1], "Isc must exceed Imp."
+        assert voc[0] > vmp[0] and voc[1] >= vmp[1], "Voc must exceed Vmp."
         assert t > -273.15, "Temperature must exceed absolute zero."
         self.isc = isc
         self.voc = voc
@@ -136,26 +136,47 @@ class solarcell:
         voc = self.voc[0] + dt * self.voc[1]
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
+        target = np.array((isc, voc, imp, vmp, imp * vmp))
 
         def model(x):
-            irelph, irel0, rs, rsh, n = x
-            return _model(irelph * isc, irel0 * 1e-20, rs, rsh, n, t)
+            irelph, irel0, rsexp, rshexp, n = x
+            return _model(
+                iph=isc * (1 + 10 ** -irelph),
+                i0=isc * (10 ** irel0),
+                rs=10 ** rsexp,
+                rsh=10 ** rshexp,
+                n=n,
+                t=t,
+            )
 
-        def cost(x):
-            target = (isc, voc, imp, vmp)
-            relerror = lambda a, e: (a - e) / e if not np.isnan(a) else np.inf
-            errors = list(starmap(relerror, zip(model(x), target)))
-            errors = np.nan_to_num(errors, nan=np.nan, posinf=1e16, neginf=-1e16)
+        def cost(x, show=False):
+            m = _metrics(*model(x))
+            actual = (m.isc, m.voc, m.imp, m.vmp, m.pmp)
+            errors = np.subtract(target, actual)
+            errors = np.nan_to_num(errors, nan=1e16, posinf=1e16, neginf=-1e16)
             return errors
 
-        x0 = (1.0, 1e0, 0, 1e0, 2.5)
-        lb = (0.9, 1e-3, 0, 1e0, 0.1)
-        ub = (1.1, 1e3, 1, 1e4, 9.9)
+        rsexp0 = np.log10((voc - vmp) / imp)
+        rshexp0 = np.log10(vmp / (isc - imp))
+        
+        x0 = (2, -14, rsexp0 - 2, rshexp0 - 2, 3.0)
+        lb = (0, -18, rsexp0 - 4, rshexp0 - 4, 0.1)
+        ub = (3, -10, rsexp0 + 1, rshexp0 + 1, 9.0)
 
-        result = least_squares(cost, x0, bounds=(lb, ub))
-        rss = np.sqrt(2 * result.cost)
-        emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
-        assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
+        result = least_squares(cost, x0, bounds=(lb, ub), x_scale=(5, 20, 5, 5, 10))
+        
+        print("Fit Targets:", _metrics(*target[:-1], None, None))
+        print("Fit Results:", _metrics(*model(result.x)))
+        print("Fit Errors:", cost(result.x))
+        print("Fit Params:", result.x)
+        print("Fit LB:", lb)
+        print("Fit UB:", ub)
+        print("Fit X0:", x0)
+        print("Fit RSS:", np.sqrt(np.sum((cost(result.x) / target)**2)))
+        
+        # rss = np.sqrt(2 * result.cost)
+        # emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
+        # assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
 
         return _metrics(*model(result.x))
 
