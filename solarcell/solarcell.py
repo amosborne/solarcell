@@ -1,10 +1,9 @@
 from functools import lru_cache, partial, wraps
 from inspect import Signature
-from itertools import starmap
 
 import numpy as np
 from scipy import constants
-from scipy.optimize import least_squares, root_scalar, brute, minimize, direct, basinhopping
+from scipy.optimize import brute, root_scalar
 from scipy.special import lambertw
 
 
@@ -60,9 +59,8 @@ def _model(iph, i0, rs, rsh, n, t, nsamp):
         return ret
 
     # compute the open-circuit voltage numerically
-    voc = root_scalar(lambda v: iv(v), bracket=(0, itot * rsh))
-    assert voc.converged
-    voc = voc.root
+    voc = root_scalar(lambda v: iv(v), bracket=(0, itot * rtot * 2))
+    voc = voc.root if voc.converged else np.nan
 
     # initialize the sampled data to be interpolated
     vx = np.linspace(0, voc, nsamp)
@@ -77,17 +75,17 @@ def _model(iph, i0, rs, rsh, n, t, nsamp):
     # locate the max power point by interpolation
     imp = ix[np.argmax(vx * ix)]
     vmp = vx[np.argmax(vx * ix)]
-    
+
     return isc, voc, imp, vmp, iv, vi
 
 
 class solarcell:
-    rss = 0.05  # the RSS error threshold at which the fit fails
+    rss = 0.01  # the RSS error threshold at which the fit fails
     nsamp = 1000  # number of samples used to interpolate curves
 
     def __init__(self, isc, voc, imp, vmp, t):
-        assert isc[0] > imp[0] and isc[1] >= imp[1], "Isc must exceed Imp."
-        assert voc[0] > vmp[0] and voc[1] >= vmp[1], "Voc must exceed Vmp."
+        assert isc[0] > imp[0], "Isc must exceed Imp."
+        assert voc[0] > vmp[0], "Voc must exceed Vmp."
         assert t > -273.15, "Temperature must exceed absolute zero."
         self.isc = isc
         self.voc = voc
@@ -113,25 +111,30 @@ class solarcell:
         voc = self.voc[0] + dt * self.voc[1]
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
+
+        assert isc > imp, "Isc must exceed Imp."
+        assert voc > vmp, "Voc must exceed Vmp."
         target = (isc, voc, imp, vmp)
 
         def model(x):
             irelph, irel0, rsexp, rshexp, n = x
             return _model(
-                iph=isc * (1 + 10 ** irelph),
-                i0=isc * (10 ** irel0),
-                rs=10 ** rsexp,
-                rsh=10 ** rshexp,
+                iph=isc * (1 + 10**irelph),
+                i0=isc * (10**irel0),
+                rs=10**rsexp,
+                rsh=10**rshexp,
                 n=n,
                 t=t,
                 nsamp=self.nsamp,
             )
-        
+
         def cost(x):
             errors = np.divide(np.subtract(target, model(x)[:4]), target)
             errors = np.nan_to_num(errors, nan=1e16, posinf=1e16, neginf=-1e16)
-            return np.sqrt(np.sum(errors ** 2))
+            return np.sqrt(np.sum(errors**2))
 
+        print(self.isc, self.imp)
+        print(target)
         rsexp0 = np.ceil(np.log10((voc - vmp) / imp))
         rshexp0 = np.floor(np.log10(vmp / (isc - imp)))
 
@@ -145,13 +148,13 @@ class solarcell:
         print("Fit Targets:", _metrics(*target, None, None))
         print("Fit Results:", _metrics(*model(x0)))
         print("Fit RSS:", cost(x0))
-        print("Fit UB:", ("{:6.2f} "*5).format(*ub))
-        print("Fit X0:", ("{:6.2f} "*5).format(*x0))
-        print("Fit LB:", ("{:6.2f} "*5).format(*lb))
+        print("Fit UB:", ("{:6.2f} " * 5).format(*ub))
+        print("Fit X0:", ("{:6.2f} " * 5).format(*x0))
+        print("Fit LB:", ("{:6.2f} " * 5).format(*lb))
 
-        # rss = np.sqrt(2 * result.cost)
-        # emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
-        # assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
+        rss = cost(x0)
+        emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
+        assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
 
         return _metrics(*model(x0))
 
