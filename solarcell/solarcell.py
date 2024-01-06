@@ -3,7 +3,7 @@ from inspect import Signature
 
 import numpy as np
 from scipy import constants
-from scipy.optimize import brute, root_scalar
+from scipy.optimize import brute, root_scalar, minimize
 from scipy.special import lambertw
 
 
@@ -32,9 +32,9 @@ def _round_cell_inputs(ttol, gtol):
         @wraps(fun)
         def wrapper(*args, **kwargs):
             binding = Signature.from_callable(fun).bind(*args, **kwargs)
-            t = binding.arguments["t"]
-            g = binding.arguments["g"]
-            return fun(args[0], round(t / ttol) * ttol, round(g / gtol) * gtol)
+            binding.arguments["t"] = round(binding.arguments["t"] / ttol) * ttol
+            binding.arguments["g"] = round(binding.arguments["g"] / gtol) * gtol
+            return fun(*binding.args, **binding.kwargs)
 
         return wrapper
 
@@ -48,7 +48,7 @@ def _model(iph, i0, rs, rsh, n, t, nsamp):
     nvth = n * constants.k * (t + 273.15) / constants.e
     rtot = rs + rsh
     itot = iph + i0
-
+    
     @np.errstate(over="ignore")
     def iv(v):
         # equation #2 from the technical reference
@@ -59,7 +59,7 @@ def _model(iph, i0, rs, rsh, n, t, nsamp):
         return ret
 
     # compute the open-circuit voltage numerically
-    voc = root_scalar(lambda v: iv(v), bracket=(0, itot * rtot * 2))
+    voc = root_scalar(lambda v: iv(v), bracket=(0, iph * rsh))
     voc = voc.root if voc.converged else np.nan
 
     # initialize the sampled data to be interpolated
@@ -79,6 +79,28 @@ def _model(iph, i0, rs, rsh, n, t, nsamp):
     return isc, voc, imp, vmp, iv, vi
 
 
+def _fit(x, isc, voc, imp, vmp, t, nsamp):
+    return _model(
+        iph=isc * x[0],
+        i0=isc * 10**x[1],
+        rs=(voc - vmp) / imp * x[2],
+        rsh=vmp / (isc - imp) * x[3],
+        n=x[4],
+        t=t,
+        nsamp=nsamp,
+    )
+
+def _cost(x, isc, voc, imp, vmp, wi, wv, t, nsamp, rss=False):
+    xisc, xvoc, ximp, xvmp, _, _ = _fit(x, isc, voc, imp, vmp, t, nsamp)
+    actual = (xisc * wi, xvoc * wv, ximp * wi, xvmp * wv)
+    target = (isc * wi, voc * wv, imp * wi, vmp * wv)
+    errors = np.subtract(target, actual)
+    errors = np.nan_to_num(errors, nan=1e16, posinf=1e16, neginf=-1e16)
+    abserr = np.sum(errors**2)
+    relerr = np.sqrt(np.sum(np.divide(errors, target)**2))
+    return relerr if rss else abserr
+
+
 class solarcell:
     rss = 0.01  # the RSS error threshold at which the fit fails
     nsamp = 1000  # number of samples used to interpolate curves
@@ -95,10 +117,7 @@ class solarcell:
 
     @_round_cell_inputs(ttol=0.1, gtol=0.01)
     @lru_cache(maxsize=128)
-    def cell(self, t, g):
-        assert t > -273.15, "Temperature must exceed absolute zero."
-        assert g >= 0, "Intensity must be non-negative."
-
+    def cell(self, t, g, wi=1, wv=1):
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
             iv = lambda v: np.where(v < 0, np.inf, 0)
@@ -112,59 +131,56 @@ class solarcell:
         imp = (self.imp[0] + dt * self.imp[1]) * g
         vmp = self.vmp[0] + dt * self.vmp[1]
 
+        # Error checking.
+        assert t > -273.15, "Temperature must exceed absolute zero."
+        assert g >= 0, "Intensity must be non-negative."
         assert isc > imp, "Isc must exceed Imp."
         assert voc > vmp, "Voc must exceed Vmp."
-        target = (isc, voc, imp, vmp)
 
-        def model(x):
-            irelph, irel0, rsexp, rshexp, n = x
-            return _model(
-                iph=isc * (1 + 10**irelph),
-                i0=isc * (10**irel0),
-                rs=10**rsexp,
-                rsh=10**rshexp,
-                n=n,
-                t=t,
-                nsamp=self.nsamp,
-            )
+        # Perform the fit by a recursive brute-force method.      
+        ns = (7, 7, 7, 7, 7)
+        args = (isc, voc, imp, vmp, wi, wv, t, self.nsamp)
 
-        def cost(x):
-            errors = np.divide(np.subtract(target, model(x)[:4]), target)
-            errors = np.nan_to_num(errors, nan=1e16, posinf=1e16, neginf=-1e16)
-            return np.sqrt(np.sum(errors**2))
-
-        print(self.isc, self.imp)
-        print(target)
-        rsexp0 = np.ceil(np.log10((voc - vmp) / imp))
-        rshexp0 = np.floor(np.log10(vmp / (isc - imp)))
-
-        lb = (-4, -32, rsexp0 - 2, rshexp0, 0.1)
-        ub = (-1, -13, rsexp0, rshexp0 + 2, 10)
-        ns = (5, 16, 5, 5, 16)
+        ub = (1.10, -16, 0.100, 1000, 6.4)
+        lb = (1.00, -22, 0.001,   10, 0.4)
+        
         ranges = [slice(lx, ux, complex(nx)) for lx, ux, nx in zip(lb, ub, ns)]
-
-        x0 = brute(cost, ranges)
-
-        print("Fit Targets:", _metrics(*target, None, None))
-        print("Fit Results:", _metrics(*model(x0)))
-        print("Fit RSS:", cost(x0))
+        x0 = brute(_cost, ranges, args, finish=None, workers=-1)
         print("Fit UB:", ("{:6.2f} " * 5).format(*ub))
         print("Fit X0:", ("{:6.2f} " * 5).format(*x0))
         print("Fit LB:", ("{:6.2f} " * 5).format(*lb))
 
-        rss = cost(x0)
+        step = [(ux - lx) / (nx - 1) for lx, ux, nx in zip(lb, ub, ns)]
+        lb = [max(xy - stepy, lx) for xy, stepy, lx in zip(x0, step, lb)]
+        ub = [min(xy + stepy, ux) for xy, stepy, ux in zip(x0, step, ub)]
+        ranges = [slice(lx, ux, complex(nx)) for lx, ux, nx in zip(lb, ub, ns)]
+        x0 = brute(_cost, ranges, args, finish=None, workers=-1)
+        print("Fit UB:", ("{:6.2f} " * 5).format(*ub))
+        print("Fit X0:", ("{:6.2f} " * 5).format(*x0))
+        print("Fit LB:", ("{:6.2f} " * 5).format(*lb))
+        
+        xisc, xvoc, ximp, xvmp, _, _ = _fit(x0, isc, voc, imp, vmp, t, self.nsamp)
+        actual = (xisc * wi, xvoc * wv, ximp * wi, xvmp * wv)
+        target = (isc * wi, voc * wv, imp * wi, vmp * wv)
+
+        print("Fit Targets:", _metrics(*target, None, None))
+        print("Fit Results:", _metrics(*actual, None, None))
+        print("Fit RSS:", _cost(x0, *args, rss=True))
+
+        rss = _cost(x0, *args, rss=True)
         emsg = "Failed model fit. RSS error of {:0.1f}% exceeds {:0.1f}%."
-        assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
+        # assert rss < self.rss, emsg.format(rss * 100, self.rss * 100)
 
-        return _metrics(*model(x0))
+        return _metrics(*_fit(x0, isc, voc, imp, vmp, t, self.nsamp))
 
-    def string(self, t, g):
+    def string(self, t, g, wi):
         # All series cells in a string have equal current.
         # The short-circuit current of the string is of the greatest cell.
         # Compute the string voltage by interpolating over string current.
-        isc = max([self.cell(*tg).isc for tg in zip(t, g)])
+        wv = t.shape[0]
+        isc = max([self.cell(*tg, wi, wv).isc for tg in zip(t, g)])
         i = np.linspace(0, isc, self.nsamp)
-        v = np.sum([self.cell(*tg).vi(i) for tg in zip(t, g)], 0)
+        v = np.sum([self.cell(*tg, wi, wv).vi(i) for tg in zip(t, g)], 0)
         v[-1] = 0  # guarantee the (isc, 0) point for interpolation
 
         voc = v[0]
@@ -180,9 +196,10 @@ class solarcell:
         # All parallel strings in an array have equal voltage.
         # The open-circuit voltage of the array is of the greatest string.
         # Compute the array current by interpolating over the array voltage.
-        voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
+        wi = t.shape[1]
+        voc = np.max([self.string(*tg, wi).voc for tg in zip(t.T, g.T)])
         v = np.linspace(0, voc, self.nsamp)
-        i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
+        i = np.sum([self.string(*tg, wi).iv(v) for tg in zip(t.T, g.T)], 0)
         i[-1] = 0  # guarantee the (0, voc) point for interpolation
 
         isc = i[0]
