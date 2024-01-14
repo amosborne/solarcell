@@ -1,20 +1,9 @@
-from functools import lru_cache, partial, wraps
-from inspect import Signature
+from functools import cache, partial
 
 import numpy as np
 from scipy import constants
-from scipy.optimize import (
-    brute,
-    minimize,
-    root_scalar,
-    least_squares,
-    minimize_scalar,
-    dual_annealing,
-    differential_evolution,
-)
+from scipy.optimize import least_squares, minimize, root_scalar
 from scipy.special import lambertw
-
-from warnings import warn
 
 
 def _model(iph, i0, rs, rsh, n, t):
@@ -34,6 +23,7 @@ def _model(iph, i0, rs, rsh, n, t):
         ret = (rsh * itot - v) / rtot - lm * nvth / rs
         return ret
 
+    @np.vectorize
     def vi(i):
         result = least_squares(lambda v: i - iv(v), 0)
         assert result.success
@@ -44,67 +34,62 @@ def _model(iph, i0, rs, rsh, n, t):
     voc = voc.root if voc.converged else np.nan
 
     # compute the max-power voltage numerically
-    vmp = minimize(
-        lambda v: 1 / (v * iv(v)), voc / 2, bounds=[(0.01 * voc, 0.99 * voc)]
-    )
+    pinv = lambda v: 1 / (v * iv(v))
+    vmp = minimize(pinv, voc / 2, bounds=[(0.01 * voc, 0.99 * voc)])
     vmp = vmp.x[0] if vmp.success else np.nan
 
-    return iv(0), voc, iv(vmp), vmp, iv, vi
+    return [iv(0), iv(vmp), 0], [0, vmp, voc], iv, vi
 
 
-def _fit(isc, voc, imp, vmp, area, t):
+def _transform(xi, exi, xiv, xv, exv, xvi, yi, yv):
+    # x is the underlying model to be transformed
+    # y is the target parameters used to define the transformation
+
+    iyx = np.poly1d(np.polyfit(xi, yi, deg=2))  # quadratic polynomial, xi -> yi
+    vyx = np.poly1d(np.polyfit(xv, yv, deg=2))  # quadratic polynomial, xv -> yv
+    ixy = np.vectorize(lambda i: (iyx - i).roots[1])  # inverse of iyx
+    vxy = np.vectorize(lambda v: (vyx - v).roots[1])  # inverse of vyx
+
+    yiv = lambda v: iyx(xiv(np.clip(vxy(v), 0, None)))  # transformed equation, yv -> yi
+    yvi = lambda i: vyx(xvi(np.clip(ixy(i), 0, None)))  # transformed equation, yi -> yv
+
+    ey = np.vectorize(
+        lambda yx, x, ex: np.poly1d([yx[0], 2 * yx[0] * x + yx[1], 0])(ex),
+        signature="(n),(),()->()",
+    )
+    eyi = ey(iyx, xi, exi)
+    eyv = ey(vyx, xv, exv)
+
+    return yiv, yvi, eyi, eyv
+
+
+def _fit(i, v, area, t, nsamp):
     def model(x):
-        return _model(isc, 10 ** x[0], 10 ** x[1], 10 ** x[2], x[3], t)
+        return _model(i[0], 10 ** x[0], 10 ** x[1], 10 ** x[2], x[3], t)
 
-    def errors(x):
-        xisc, xvoc, ximp, xvmp, xiv, xvi = model(x)
-        ierrors = np.array([xisc - isc, ximp - imp, xiv(voc)])
-        verrors = np.array([xvoc - voc, xvmp - vmp, xvi(isc)])
-        return *ierrors, *verrors
+    def relerrors(x):
+        xi, xv, _, _ = model(x)
+        ri = np.divide(np.subtract(xi[:2], i[:2]), i[:2])
+        rv = np.divide(np.subtract(xv[-2:], v[-2:]), v[-2:])
+        return *ri, *rv
 
     # Perform a least-squares numeric fit to the diode model curve definition.
-    # Try multiple loss functions and use that which produces the best result.
     lb = (-20 + np.log10(area), np.log10(0.5 / area), np.log10(1e3 / area), 0.5)
     ub = (-10 + np.log10(area), np.log10(1.3 / area), np.log10(1e7 / area), 3.5)
     x0 = (-15 + np.log10(area), np.log10(0.9 / area), np.log10(1e5 / area), 2.0)
 
-    best = None
-    for loss in ["linear", "soft_l1", "huber", "cauchy", "arctan"]:
-        for f_scale in np.linspace(1, 2, 10):
-            result = least_squares(
-                errors, x0, bounds=(lb, ub), loss=loss, f_scale=f_scale, ftol=0.001
-            )
-            if result.success and (best is None or result.cost < best.cost):
-                best = result
-            if loss == "linear":
-                break
+    result = least_squares(relerrors, x0, bounds=(lb, ub))
+    assert result.success
 
-    assert best is not None
-
-    # Scale and shift the resulting curve to optimize for the critical points.
-    xierr, xverr = np.reshape(errors(best.x), (2, 3))
-    xisc, xvoc, ximp, xvmp, xiv, xvi = model(best.x)
-    ipoly = np.poly1d(np.polyfit(x=(xisc, ximp, 0), y=(isc, imp, 0), deg=2))
-    vpoly = np.poly1d(np.polyfit(x=(xvoc, xvmp, 0), y=(voc, vmp, 0), deg=2))
-    iroot = np.vectorize(lambda i: (ipoly - i).roots[1])
-    vroot = np.vectorize(lambda v: (vpoly - v).roots[1])
-
-    yiv = lambda v: ipoly(xiv(vroot(v)))
-    yvi = lambda i: vpoly(xvi(iroot(i)))
-
-    yierr = np.vectorize(
-        lambda dxi, yi: np.roots([ipoly[0], 2 * ipoly[0] * yi + ipoly[1], -dxi])[1],
-        signature="(),()->()",
-    )(xierr, [isc, imp, 0])
-    yverr = np.vectorize(
-        lambda dxv, yv: np.roots([vpoly[0], 2 * vpoly[0] * yv + vpoly[1], -dxv])[1],
-        signature="(),()->()",
-    )(xverr, [voc, vmp, 0])
-
-    return yiv, yvi, yierr, yverr
-
-def _transform():
-    pass
+    # Transform the resulting curve to force onto the critical points.
+    # Redefine the model functions as interpolations for speed.
+    xi, xv, xiv, xvi = model(result.x)
+    vk = np.linspace(0, xv[2], nsamp)
+    ik = np.linspace(0, xi[0], nsamp)
+    xiv = partial(np.interp, xp=vk, fp=xiv(vk), left=np.inf, right=0)
+    xvi = partial(np.interp, xp=ik, fp=xvi(ik), left=np.nan, right=0)
+    exi, exv = np.subtract(xi, i), np.subtract(xv, v)
+    return _transform(xi, exi, xiv, xv, exv, xvi, i, v)
 
 
 class solarcurve:
@@ -133,23 +118,28 @@ class solarcurve:
         return v * self.iv(v)  # V -> W
 
     def pi(self, i):
-        return i + self.vi(i)  # A -> W
+        return i * self.vi(i)  # A -> W
 
     def __repr__(self):
-        iL, iR = "{:0.4g}".format(self.isc).split(".")
-        istr = " = {:" + str(len(iL)) + "." + str(len(iR)) + "f} A"
+        def fstring(quantities, unit):
+            nL, nR = 0, 0
+            for quantity in quantities:
+                strL, strR = "{:#.4g}".format(quantity).split(".")
+                nL, nR = max(len(strL), nL), max(len(strR), nR)
+
+            return " = {:" + str(nL + nR + 1) + "." + str(nR) + "f} " + unit
+
+        istr = fstring([self.isc, self.imp, self.iunc], "A")
         isc = "Isc " + istr.format(self.isc)
         imp = "Imp " + istr.format(self.imp)
         iunc = "Iunc" + istr.format(self.iunc)
 
-        vL, vR = "{:0.4g}".format(self.voc).split(".")
-        vstr = " = {:" + str(len(vL)) + "." + str(len(vR)) + "f} V"
+        vstr = fstring([self.voc, self.vmp, self.vunc], "V")
         voc = "Voc " + vstr.format(self.voc)
         vmp = "Vmp " + vstr.format(self.vmp)
         vunc = "Vunc" + vstr.format(self.vunc)
 
-        pL, pR = "{:0.4g}".format(self.pmp).split(".")
-        pstr = " = {:" + str(len(pL)) + "." + str(len(pR)) + "f} W"
+        pstr = fstring([self.pmp, self.punc], "W")
         pmp = "Pmp " + pstr.format(self.pmp)
         punc = "Punc" + pstr.format(self.punc)
 
@@ -185,18 +175,18 @@ class solarcell(solarcurve):
         self.dvmp = vmp[1]
 
         # Numerically fit using the cell model at full illumination.
-        self.iv, self.vi, self.ierr, self.verr = _fit(
-            isc[0], voc[0], imp[0], vmp[0], area, t
-        )
+        self.i, self.v = [isc[0], imp[0], 0], [0, vmp[0], voc[0]]
+        self.iv, self.vi, self.ei, self.ev = _fit(self.i, self.v, area, t, self.nsamp)
 
     @property
     def iunc(self):
-        return np.sqrt(np.sum(self.ierr**2))
+        return np.sqrt(np.sum(self.ei**2))
 
     @property
     def vunc(self):
-        return np.sqrt(np.sum(self.verr**2))
+        return np.sqrt(np.sum(self.ev**2))
 
+    @cache
     def cell(self, t, g):
         # Skip the curve fit altogether if the cell is dark.
         if g == 0:
@@ -216,29 +206,17 @@ class solarcell(solarcurve):
         assert isc > imp, "Isc must exceed Imp."
         assert voc > vmp, "Voc must exceed Vmp."
 
-        # Scale and shift the underlying curve to optimize for the critical points.
-        ipoly = np.poly1d(np.polyfit(x=(self.isc, self.imp, 0), y=(isc, imp, 0), deg=2))
-        vpoly = np.poly1d(np.polyfit(x=(self.voc, self.vmp, 0), y=(voc, vmp, 0), deg=2))
-        iroot = np.vectorize(lambda i: (ipoly - i).roots[1])
-        vroot = np.vectorize(lambda v: (vpoly - v).roots[1])
-
-        iv = lambda v: ipoly(self.iv(vroot(v)))
-        vi = lambda i: vpoly(self.vi(iroot(i)))
-        #ierr = self.ierr / (2 * ipoly[0] * np.array([isc, imp, 0]) + ipoly[1])
-        #verr = self.verr / (2 * vpoly[0] * np.array([voc, vmp, 0]) + vpoly[1])
-
-        ierr = np.vectorize(
-            lambda di, i: np.roots([ipoly[0], 2 * ipoly[0] * i + ipoly[1], -di])[1],
-            signature="(),()->()",
-        )(self.ierr, [isc, imp, 0])
-        verr = np.vectorize(
-            lambda dv, v: np.roots([vpoly[0], 2 * vpoly[0] * v + vpoly[1], -dv])[1],
-            signature="(),()->()",
-        )(self.verr, [voc, vmp, 0])
-
-        
-        iunc = np.sqrt(np.sum(ierr**2))
-        vunc = np.sqrt(np.sum(verr**2))
+        # Transform the resulting curve to force onto the critical points.
+        i, v = [isc, imp, 0], [0, vmp, voc]
+        iv, vi, ei, ev = _transform(
+            self.i, self.ei, self.iv, self.v, self.ev, self.vi, i, v
+        )
+        vk = np.linspace(0, voc, self.nsamp)
+        ik = np.linspace(0, isc, self.nsamp)
+        iv = partial(np.interp, xp=vk, fp=iv(vk), left=np.inf, right=0)
+        vi = partial(np.interp, xp=ik, fp=vi(ik), left=np.nan, right=0)
+        iunc = np.sqrt(np.sum(ei**2))
+        vunc = np.sqrt(np.sum(ev**2))
 
         return solarcurve(isc, voc, imp, vmp, iv, vi, iunc, vunc)
 
@@ -249,8 +227,7 @@ class solarcell(solarcurve):
         cells = [self.cell(*tg) for tg in zip(t, g)]
         isc = max([c.isc for c in cells])
         i = np.linspace(0, isc, self.nsamp)
-        v = np.sum([c.vi(i) for c in cells])
-        # print(i, v)
+        v = np.sum([c.vi(i) for c in cells], 0)
         v[-1] = 0  # guarantee the (isc, 0) point for interpolation
 
         voc = v[0]
@@ -260,15 +237,19 @@ class solarcell(solarcurve):
         iv = partial(np.interp, xp=v[::-1], fp=i[::-1], left=np.inf, right=0)
         vi = partial(np.interp, xp=i, fp=v, left=np.nan, right=0)
 
-        return _metrics(isc, voc, imp, vmp, iv, vi)
+        iunc = np.max([c.iunc for c in cells])
+        vunc = np.sqrt(np.sum(np.square([c.vunc for c in cells])))
+
+        return solarcurve(isc, voc, imp, vmp, iv, vi, iunc, vunc)
 
     def array(self, t, g):
         # All parallel strings in an array have equal voltage.
         # The open-circuit voltage of the array is of the greatest string.
         # Compute the array current by interpolating over the array voltage.
-        voc = np.max([self.string(*tg).voc for tg in zip(t.T, g.T)])
+        strings = [self.string(*tg) for tg in zip(t.T, g.T)]
+        voc = np.max([s.voc for s in strings])
         v = np.linspace(0, voc, self.nsamp)
-        i = np.sum([self.string(*tg).iv(v) for tg in zip(t.T, g.T)], 0)
+        i = np.sum([s.iv(v) for s in strings], 0)
         i[-1] = 0  # guarantee the (0, voc) point for interpolation
 
         isc = i[0]
@@ -278,4 +259,7 @@ class solarcell(solarcurve):
         iv = partial(np.interp, xp=v, fp=i, left=np.inf, right=0)
         vi = partial(np.interp, xp=i[::-1], fp=v[::-1], left=np.nan, right=0)
 
-        return _metrics(isc, voc, imp, vmp, iv, vi)
+        iunc = np.sqrt(np.sum(np.square([s.iunc for s in strings])))
+        vunc = np.max([s.vunc for s in strings])
+
+        return solarcurve(isc, voc, imp, vmp, iv, vi, iunc, vunc)
