@@ -21,12 +21,16 @@ azur3g30a = solarcell(
     voc=(2.690, -0.0062),  # open-circuit voltage, temp coefficient
     imp=(0.5029, 0.00024),  # max-power current, temp coefficient
     vmp=(2.409, -0.0067),  # max-power voltage, temp coefficient
+    area=30.18,  # solar cell area
     t=28,  # temperature at which the above parameters are specified
 )
 
 array = azur3g30a.array(t=np.full((24, 12), 80), g=np.ones((24, 12)))
 
-print(array)  # isc=6.581, voc=56.84, imp=6.073, vmp=49.39, pmp=299.9
+print(array)
+# Isc  = 6.459840 A, Voc  = 56.82240 V
+# Imp  = 6.187802 A, Vmp  = 49.42809 V, Pmp  = 305.8513 W
+# Iunc = 0.002657 A, Vunc =  0.03147 V, Punc =   0.2349 W
 
 fig, (ax0, ax1) = plt.subplots(nrows=2, sharex=True)
 
@@ -39,9 +43,9 @@ ax1.plot(v, array.pv(v)), ax1.grid()
 
 ## Background
 
-A numeric optimization procedure is used to best fit the classic photovoltaic cell single diode model equation to the datasheet parameters. Combining cells in series/parallel with different IV-curves is done by linear interpolation. A cache is implemented to increase speed for repeated computations; temperatures are rounded to 0.1C and intensities are rounded to 0.01 (unitless) to increase the likelihood of a cache hit... more aggressive rounding by the user will yield even better performance.
+A numeric optimization procedure is used to best fit the classic photovoltaic cell single diode model equation to the datasheet parameters at the reference temperature. Curves at other temperatures are derived relative to this initial curve fit by way of a quadratic transformation that maintains the characteristic shape of the curve. Combining cells in series/parallel with different IV-curves is done by linear interpolation. Voltage, current, and power uncertainty figures are propagated through all calculations to give an estimate of how much the resulting curve deviates from the exact physics-based equation.
 
-When computing a curve, the provided temperatures and intensities are generally organized as follows: `cell(t, g)` accepts single values, `string(t, g)` accepts one-dimensional arrays, and `array(t, g)` accepts two-dimensional arrays (where strings make up the columns).
+When computing a curve, the provided temperatures and intensities are generally organized as follows: `cell(t, g)` accepts single values, `string(t, g)` accepts one-dimensional arrays, and `array(t, g)` accepts two-dimensional arrays (where strings make up the columns). A cache is implemented to increase speed for repeated computations; rounding by the user will yield better performance.
 
 ## References
 
