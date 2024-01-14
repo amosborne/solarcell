@@ -212,9 +212,11 @@ class solarcell(solarcurve):
             self.i, self.ei, self.iv, self.v, self.ev, self.vi, i, v
         )
         vk = np.linspace(0, voc, self.nsamp)
-        ik = np.linspace(0, isc, self.nsamp)
-        iv = partial(np.interp, xp=vk, fp=iv(vk), left=np.inf, right=0)
-        vi = partial(np.interp, xp=ik, fp=vi(ik), left=np.nan, right=0)
+        ik = iv(vk)
+        ik[-1] = 0
+        ik[0] = isc
+        iv = partial(np.interp, xp=vk, fp=ik, left=np.inf, right=0)
+        vi = partial(np.interp, xp=ik[::-1], fp=vk[::-1], left=np.nan, right=0)
         iunc = np.sqrt(np.sum(ei**2))
         vunc = np.sqrt(np.sum(ev**2))
 
