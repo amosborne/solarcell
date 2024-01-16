@@ -21,7 +21,7 @@ azur3g30a = solarcell(
     voc=(2.690, -0.0062),  # open-circuit voltage, temp coefficient
     imp=(0.5029, 0.00024),  # max-power current, temp coefficient
     vmp=(2.409, -0.0067),  # max-power voltage, temp coefficient
-    area=30.18,  # solar cell area
+    area=30.18,  # solar cell area in square centimeters
     t=28,  # temperature at which the above parameters are specified
 )
 
