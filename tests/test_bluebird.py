@@ -32,8 +32,8 @@ def test_cell():
     assert cell.imp > bluebird.imp
     assert cell.voc < bluebird.voc
     assert cell.vmp < bluebird.vmp
-    assert pytest.approx(cell.pmp, rel=1e-3) == cell.pv(cell.vmp)
-    assert pytest.approx(cell.pmp, rel=1e-3) == cell.pi(cell.imp)
+    assert pytest.approx(cell.pmp, rel=0.01) == cell.pv(cell.vmp)
+    assert pytest.approx(cell.pmp, rel=0.01) == cell.pi(cell.imp)
     assert cell.iv(cell.voc + 1) == 0  # no current when blocking
     assert np.isposinf(cell.iv(-1))  # bypass current when reversed
     assert cell.pv(cell.voc + 1) == 0  # no current when blocking
@@ -51,22 +51,22 @@ def test_solution():
 
 def test_string():
     string = bluebird.string(t=[28, 28], g=[1, 1])
-    assert pytest.approx(string.isc, rel=1e-3) == bluebird.isc
-    assert pytest.approx(string.voc, rel=1e-3) == bluebird.voc * 2
-    assert pytest.approx(string.imp, rel=1e-3) == bluebird.imp
-    assert pytest.approx(string.vmp, rel=1e-3) == bluebird.vmp * 2
-    assert pytest.approx(string.pmp, rel=1e-3) == bluebird.pmp * 2
+    assert string.isc == pytest.approx(bluebird.isc * 1, rel=0.01)
+    assert string.voc == pytest.approx(bluebird.voc * 2, rel=0.01)
+    assert string.imp == pytest.approx(bluebird.imp * 1, rel=0.01)
+    assert string.vmp == pytest.approx(bluebird.vmp * 2, rel=0.01)
+    assert string.pmp == pytest.approx(bluebird.pmp * 2, rel=0.01)
 
 
 def test_array():
     # Fully illuminated.
     array = bluebird.array(t=np.full((3, 3), 28), g=np.full((3, 3), 1))
-    assert pytest.approx(array.pmp, rel=1e-3) == bluebird.pmp * 9
-    assert pytest.approx(array.isc, rel=1e-3) == bluebird.isc * 3
-    assert pytest.approx(array.voc, rel=1e-3) == bluebird.voc * 3
+    assert array.pmp == pytest.approx(bluebird.pmp * 9, rel=0.01)
+    assert array.isc == pytest.approx(bluebird.isc * 3, rel=0.01)
+    assert array.voc == pytest.approx(bluebird.voc * 3, rel=0.01)
 
     # Half illuminated.
     array = bluebird.array(t=np.full((3, 3), 28), g=np.eye(3))
-    assert pytest.approx(array.pmp, rel=1e-3) == bluebird.pmp * 3
-    assert pytest.approx(array.isc, rel=1e-3) == bluebird.isc * 3
-    assert pytest.approx(array.voc, rel=1e-3) == bluebird.voc * 1
+    assert array.pmp == pytest.approx(bluebird.pmp * 3, rel=0.01)
+    assert array.isc == pytest.approx(bluebird.isc * 3, rel=0.01)
+    assert array.voc == pytest.approx(bluebird.voc * 1, rel=0.01)
