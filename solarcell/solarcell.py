@@ -3,7 +3,7 @@ from functools import cache, partial
 import numpy as np
 from numpy.polynomial import Polynomial
 from scipy import constants
-from scipy.optimize import least_squares, minimize, root_scalar, brute, shgo
+from scipy.optimize import least_squares, minimize, root_scalar, brute, shgo, curve_fit, minimize_scalar
 from scipy.special import lambertw
 
 
@@ -14,24 +14,23 @@ def _model(iph, i0, rs, rsh, n, t, k):
     nvth = n * constants.k * (t + 273.15) / constants.e
     rtot = rs + rsh
     itot = iph + i0
-    tol = 1e-10
 
     @np.errstate(over="ignore")
     def iv(v):
         # equation #2 from the technical reference
         ex = rsh * (rs * itot + v) / nvth / rtot
         wf = rs * rsh * i0 * np.exp(ex) / nvth / rtot
-        lm = np.real_if_close(lambertw(wf, tol=tol))
+        lm = np.real_if_close(lambertw(wf))
         ret = (rsh * itot - v) / rtot - lm * nvth / rs
         return ret
 
     # compute the open-circuit voltage numerically
-    voc = root_scalar(lambda v: iv(v), bracket=(0, iph * rsh), rtol=tol)
+    voc = root_scalar(lambda v: iv(v), bracket=(0, iph * rsh))
     voc = voc.root if voc.converged else np.nan
 
     # compute the max-power voltage numerically
     pinv = lambda v: 1 / (v * iv(v))
-    vmp = minimize(pinv, voc / 2, bounds=[(0.01 * voc, 0.99 * voc)], tol=tol)
+    vmp = minimize(pinv, voc / 2, bounds=[(0.01 * voc, 0.99 * voc)])
     vmp = vmp.x[0] if vmp.success else np.nan
 
     return iv(0), voc, iv(vmp), vmp, iv
@@ -150,66 +149,46 @@ class solarcell(solarcurve):
             v = root_scalar(lambda v: self.xiv(v) - i, x0=self.xvoc)
             return v.root if v.converged else np.nan
 
-        @np.errstate(divide="ignore")
-        def mpp(iv, vi):
-            # return the max power point of the given equations
-            imp = minimize(lambda i: 1 / (vi(i) * i), isc / 2, bounds=[(0, isc)])
-            vmp = minimize(lambda v: 1 / (iv(v) * v), voc / 2, bounds=[(0, voc)])
-            assert imp.success and vmp.success
-            return imp.x[0], vmp.x[0]
+        def exponential(xvmp):
+            # numerically solve for the exponential equation coefficients, y = A * exp(B * x) + C
+            def fit(xp, xc, yp, yc):
+                func = lambda b: (yc * (1 - np.exp(b * xp))) / (yp * (1 - np.exp(b * xc))) - 1
+                sol = root_scalar(func, x0=2 * np.log((yc + yp) / 2) / (xc + xp))
+                assert sol.converged
+                c = yp / (1 - np.exp(sol.root * xp))
+                return lambda x: -c * np.exp(np.multiply(sol.root, x)) + c
 
-        def quadratic(xit0, xvt0, xit1, xvt1):
-            # x is the underlying model to be transformed
-            # y is the target parameters used to define the transformation
-            # (xit, xvt) on the underlying model corresponds to (yimp, yvmp) on the transform
-            xi = [self.xisc, self.ximp + xit0, self.ximp - xit1, 0]
-            xv = [0, self.xvmp - xvt0, self.xvmp + xvt1, self.xvoc]
-            yi = [isc, (isc + imp) / 2, imp, 0]
-            yv = [0, vmp, (voc + vmp) / 2, voc]
-    
-            # compute the quadratic transformation
-            iyx = Polynomial.fit(xi, yi, deg=3, domain=None)  # quadratic polynomial, xi -> yi
-            vyx = Polynomial.fit(xv, yv, deg=3, domain=None)  # quadratic polynomial, xv -> yv
-            ixy = Polynomial.fit(yi, xi, deg=3, domain=None)  # quadratic polynomial, yi -> xi
-            vxy = Polynomial.fit(yv, xv, deg=3, domain=None)  # quadratic polynomial, yv -> xv
-            yiv = np.vectorize(lambda v: iyx(self.xiv(vxy(v))))  # transformed equation, yv -> yi
-            yvi = np.vectorize(lambda i: vyx(xvi(ixy(i))))  # transformed equation, yv -> yi
+            # compute the exponential transformation
+            iyx = fit(self.xiv(xvmp), self.xisc, imp, isc)
+            vyx = fit(xvmp, self.xvoc, vmp, voc)
+            ixy = fit(imp, isc, self.xiv(xvmp), self.xisc)
+            vxy = fit(vmp, voc, xvmp, self.xvoc)
+
+            yiv = np.vectorize(lambda v: iyx(self.xiv(vxy(v))))  # yv -> yi
+            yvi = np.vectorize(lambda i: vyx(xvi(ixy(i))))  # yi -> yv
 
             return iyx, vyx, yiv, yvi
 
-        def resids(x):
-            # residuals function to optimize for the point (xit, xvt)
-            _, _, yiv, yvi = quadratic(*x)
+        @np.errstate(divide="ignore")
+        def mpp(iv, vi):
+            # return the max power point of the given equations
+            rvmp = minimize(lambda v: 1 / (iv(v) * v), vmp, bounds=[(0.01 * voc, 0.99 * voc)])
+            assert rvmp.success
+            return iv(rvmp.x)[0], rvmp.x[0]
+
+        def cost(xvmp):
+            _, _, yiv, yvi = exponential(xvmp)
             yimp, yvmp = mpp(yiv, yvi)
-            return (yimp - imp) / imp, (yvmp - vmp) / vmp
+            resids = [(yimp - imp) / imp, (yvmp - vmp) / vmp]
+            return np.sum(np.square(resids))
 
-        # TODO: try brute force with polishing function at (imp, vmp+ +/- 10%
-        # can we take a guess at what the range of xvt is?
-        # if we know vmp relative to voc on the target curve
-        # imp_range = self.ximp + np.array([-1, 1]) * (self.xisc - self.ximp) / 4
-        # vmp_range = self.xvmp + np.array([-1, 1]) * (self.xvoc - self.xvmp) / 4
-        # f_tol = min(self.ximp, self.xvmp) / 1e6
-        # cost = lambda x: np.sum(np.square(resids(x)))
-        # result = shgo(cost, [imp_range, vmp_range], options={"f_tol": f_tol})
-        # x0 = result.x
+        result = minimize_scalar(cost, bounds=(0.9 * self.xvmp, 1.1 * self.xvmp))
+        assert result.success
         
-        # #x0 = brute(cost, ranges=[imp_range, vmp_range], Ns=10, finish=None)
-        # print(resids(x0))
-        
-        # optimize for the point (xit, xvt)
-
-        x0 = (0,0,0,0)
-        bounds = ([0, 0, 0, 0], [(self.xisc - self.ximp), (self.xvoc - self.xvmp), (self.xisc - self.ximp), (self.xvoc - self.xvmp)])
-        result = least_squares(resids, x0, bounds=bounds)
-        x0 = result.x
-        print(resids(x0))
-        
-        
-        # print(result)
-        # assert result.success
-        
-        # locate the new max power point on the transformed curve
-        iyx, vyx, yiv, yvi = quadratic(*x0)
+        iyx, vyx, yiv, yvi = exponential(result.x)
+        print((imp, vmp), mpp(yiv, yvi))
+        print(self.xvmp - result.x)
+        print(cost(result.x))
 
         # generate the interpolation functions
         yv = np.linspace(0, voc, self.nsamp)
