@@ -29,9 +29,8 @@ def _model(iph, i0, rs, rsh, n, t, k):
     voc = voc.root if voc.converged else np.nan
 
     # compute the max-power voltage numerically
-    pinv = lambda v: 1 / (v * iv(v))
-    vmp = minimize(pinv, voc / 2, bounds=[(0.01 * voc, 0.99 * voc)])
-    vmp = vmp.x[0] if vmp.success else np.nan
+    vmp = minimize_scalar(lambda v: 1 / (v * iv(v)) ** 2, bounds=(0, voc))
+    vmp = vmp.x if vmp.success else np.nan
 
     return iv(0), voc, iv(vmp), vmp, iv
 
@@ -143,52 +142,69 @@ class solarcell(solarcurve):
         self.xisc, self.xvoc, self.ximp, self.xvmp, self.xiv = model(result.x)
 
     def _transform(self, isc, voc, imp, vmp):
+        # linear transformation model equations:
+        # yi = (ai * yv + bi) * xi, where yv = (av * xi + bv) * xv and xi = xiv(xv)
+        bv = voc / self.xvoc
+        av = 0.95 * (vmp / self.xvmp - bv) / self.ximp
+        bi = isc / self.xisc
+        ai = 0 # (imp / self.ximp - bi) / vmp
+        print(ai, bi, av, bv)
 
-        def xvi(i):
-            # inversion of the underlying model equation
-            v = root_scalar(lambda v: self.xiv(v) - i, x0=self.xvoc)
-            return v.root if v.converged else np.nan
+        @np.vectorize
+        def xvi(xi):
+            # inversion of the underlying model equation, xiv
+            xv = root_scalar(lambda xv: self.xiv(xv) - xi, x0=self.xvoc)
+            return xv.root if xv.converged else np.nan
 
-        def exponential(xvmp):
-            # numerically solve for the exponential equation coefficients, y = A * exp(B * x) + C
-            def fit(xp, xc, yp, yc):
-                func = lambda b: (yc * (1 - np.exp(b * xp))) / (yp * (1 - np.exp(b * xc))) - 1
-                sol = root_scalar(func, x0=2 * np.log((yc + yp) / 2) / (xc + xp))
-                assert sol.converged
-                c = yp / (1 - np.exp(sol.root * xp))
-                return lambda x: -c * np.exp(np.multiply(sol.root, x)) + c
+        vyx = lambda xv: (av * self.xiv(xv) + bv) * xv
+        iyx = lambda xi: (ai * (av * xi + bv) * xvi(xi) + bi) * xi
 
-            # compute the exponential transformation
-            iyx = fit(self.xiv(xvmp), self.xisc, imp, isc)
-            vyx = fit(xvmp, self.xvoc, vmp, voc)
-            ixy = fit(imp, isc, self.xiv(xvmp), self.xisc)
-            vxy = fit(vmp, voc, xvmp, self.xvoc)
+        @np.vectorize
+        def vxy(yv):
+            # inversion of the voltage transformation equation, vyx
+            xv = root_scalar(lambda xv: vyx(xv) - yv, x0=yv / bv)
+            return xv.root if xv.converged else np.nan
 
-            yiv = np.vectorize(lambda v: iyx(self.xiv(vxy(v))))  # yv -> yi
-            yvi = np.vectorize(lambda i: vyx(xvi(ixy(i))))  # yi -> yv
+        yiv = lambda yv: iyx(self.xiv(vxy(yv)))
 
-            return iyx, vyx, yiv, yvi
+        # def exponential(xvmp):
+        #     # numerically solve for the exponential equation coefficients, y = A * exp(B * x) + C
+        #     def fit(xp, xc, yp, yc):
+        #         func = lambda b: (yc * (1 - np.exp(b * xp))) / (yp * (1 - np.exp(b * xc))) - 1
+        #         sol = root_scalar(func, x0=2 * np.log((yc + yp) / 2) / (xc + xp))
+        #         assert sol.converged
+        #         c = yp / (1 - np.exp(sol.root * xp))
+        #         return lambda x: -c * np.exp(np.multiply(sol.root, x)) + c
 
-        @np.errstate(divide="ignore")
-        def mpp(iv, vi):
-            # return the max power point of the given equations
-            rvmp = minimize(lambda v: 1 / (iv(v) * v), vmp, bounds=[(0.01 * voc, 0.99 * voc)])
-            assert rvmp.success
-            return iv(rvmp.x)[0], rvmp.x[0]
+        #     # compute the exponential transformation
+        #     iyx = fit(self.xiv(xvmp), self.xisc, imp, isc)
+        #     vyx = fit(xvmp, self.xvoc, vmp, voc)
+        #     ixy = fit(imp, isc, self.xiv(xvmp), self.xisc)
+        #     vxy = fit(vmp, voc, xvmp, self.xvoc)
 
-        def cost(xvmp):
-            _, _, yiv, yvi = exponential(xvmp)
-            yimp, yvmp = mpp(yiv, yvi)
-            resids = [(yimp - imp) / imp, (yvmp - vmp) / vmp]
-            return np.sum(np.square(resids))
+        #     yiv = np.vectorize(lambda v: iyx(self.xiv(vxy(v))))  # yv -> yi
+        #     yvi = np.vectorize(lambda i: vyx(xvi(ixy(i))))  # yi -> yv
 
-        result = minimize_scalar(cost, bounds=(0.9 * self.xvmp, 1.1 * self.xvmp))
-        assert result.success
+        #     return iyx, vyx, yiv, yvi
+
+        # @np.errstate(divide="ignore")
+        yvmp = minimize_scalar(lambda yv: 1 / (yiv(yv) * yv) ** 2, bounds=(0, voc))
+        assert yvmp.success
+        print(yvmp.x, vmp)
+
+        # def cost(xvmp):
+        #     _, _, yiv, yvi = exponential(xvmp)
+        #     yimp, yvmp = mpp(yiv, yvi)
+        #     resids = [(yimp - imp) / imp, (yvmp - vmp) / vmp]
+        #     return np.sum(np.square(resids))
+
+        # result = minimize_scalar(cost, bounds=(0.9 * self.xvmp, 1.1 * self.xvmp))
+        # assert result.success
         
-        iyx, vyx, yiv, yvi = exponential(result.x)
-        print((imp, vmp), mpp(yiv, yvi))
-        print(self.xvmp - result.x)
-        print(cost(result.x))
+        # iyx, vyx, yiv, yvi = exponential(result.x)
+        # print((imp, vmp), mpp(yiv, yvi))
+        # print(self.xvmp - result.x)
+        # print(cost(result.x))
 
         # generate the interpolation functions
         yv = np.linspace(0, voc, self.nsamp)
@@ -199,10 +215,10 @@ class solarcell(solarcurve):
         yvi = partial(np.interp, xp=yi[::-1], fp=yv[::-1], left=np.nan, right=0)
 
         # propagate the error
-        eyi = [iyx(self.xisc) - iyx(self.isc), iyx(self.ximp) - iyx(self.imp)]
-        eyv = [vyx(self.xvoc) - vyx(self.voc), vyx(self.xvmp) - vyx(self.vmp)]
-        yiunc = np.sqrt(np.sum(np.square(eyi)))
-        yvunc = np.sqrt(np.sum(np.square(eyv)))
+        # eyi = [iyx(self.xisc) - iyx(self.isc), iyx(self.ximp) - iyx(self.imp)]
+        # eyv = [vyx(self.xvoc) - vyx(self.voc), vyx(self.xvmp) - vyx(self.vmp)]
+        yiunc = 0 # np.sqrt(np.sum(np.square(eyi)))
+        yvunc = 0 # np.sqrt(np.sum(np.square(eyv)))
 
         return yiv, yvi, yiunc, yvunc
 
