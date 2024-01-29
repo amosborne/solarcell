@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "solarcell"
-version = "0.1.0"
+version = "0.2.0"
 description = "Estimate IV- and PV-curves given photovoltaic cell datasheet parameters."
 authors = ["Alexander Osborne <alex@osborneee.com>"]
 license = "MIT"

@@ -1,11 +1,13 @@
 # solarcell
 Estimate IV- and PV-curves given photovoltaic cell datasheet parameters. Capable of generating combined curves for solar arrays with temperature and light intensity gradients. Assumes ideal bypass and blocking diodes for all cells.
 
+[Available for download on PyPI.](https://pypi.org/project/solarcell/)
+
 `pip install solarcell`
 
 ## Usage
 
-Please see the examples contained within this repository.
+See the examples contained within this repository. Please also consider reading the related blog post, ["How To Estimate Complex Solar Array Power Curves".](https://www.osborneee.com/solarcell/)
 
 ```python
 import numpy as np
@@ -21,16 +23,15 @@ azur3g30a = solarcell(
     voc=(2.690, -0.0062),  # open-circuit voltage, temp coefficient
     imp=(0.5029, 0.00024),  # max-power current, temp coefficient
     vmp=(2.409, -0.0067),  # max-power voltage, temp coefficient
-    area=30.18,  # solar cell area
+    area=30.18,  # solar cell area in square centimeters
     t=28,  # temperature at which the above parameters are specified
 )
 
 array = azur3g30a.array(t=np.full((24, 12), 80), g=np.ones((24, 12)))
 
 print(array)
-# Isc  = 6.459840 A, Voc  = 56.82240 V
-# Imp  = 6.187802 A, Vmp  = 49.42809 V, Pmp  = 305.8513 W
-# Iunc = 0.002657 A, Vunc =  0.03147 V, Punc =   0.2349 W
+# Isc = 6.460 A, Voc = 56.82 V
+# Imp = 6.201 A, Vmp = 49.33 V, Pmp = 305.9 W
 
 fig, (ax0, ax1) = plt.subplots(nrows=2, sharex=True)
 
@@ -43,7 +44,7 @@ ax1.plot(v, array.pv(v)), ax1.grid()
 
 ## Background
 
-A numeric optimization procedure is used to best fit the classic photovoltaic cell single diode model equation to the datasheet parameters at the reference temperature. Curves at other temperatures are derived relative to this initial curve fit by way of a quadratic transformation that maintains the characteristic shape of the curve. Combining cells in series/parallel with different IV-curves is done by linear interpolation. Voltage, current, and power uncertainty figures are propagated through all calculations to give an estimate of how much the resulting curve deviates from the exact physics-based equation.
+A numeric optimization procedure is used to best fit the classic photovoltaic cell single diode model equation to the datasheet parameters at the reference temperature. Curves at other temperatures are derived relative to this initial curve fit by way of a linear transformation (plus a sigmoid smoothing function) that maintains the characteristic shape of the curve. Combining cells in series/parallel with different IV-curves is done by linear interpolation.
 
 When computing a curve, the provided temperatures and intensities are generally organized as follows: `cell(t, g)` accepts single values, `string(t, g)` accepts one-dimensional arrays, and `array(t, g)` accepts two-dimensional arrays (where strings make up the columns). A cache is implemented to increase speed for repeated computations; rounding by the user will yield better performance.
 
