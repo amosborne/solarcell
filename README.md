@@ -1,11 +1,13 @@
 # solarcell
 Estimate IV- and PV-curves given photovoltaic cell datasheet parameters. Capable of generating combined curves for solar arrays with temperature and light intensity gradients. Assumes ideal bypass and blocking diodes for all cells.
 
+[Available for download on PyPI.](https://pypi.org/project/solarcell/)
+
 `pip install solarcell`
 
 ## Usage
 
-Please see the examples contained within this repository.
+See the examples contained within this repository. Please also consider reading the related blog post, ["How To Estimate Complex Solar Array Power Curves".](https://www.osborneee.com/solarcell/)
 
 ```python
 import numpy as np
