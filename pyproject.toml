@@ -25,11 +25,11 @@ scipy = "^1.11.4"
 jupyterlab = "^4.0.9"
 matplotlib = "^3.8.2"
 jupyter-black = "^0.3.4"
-black = {extras = ["jupyter"], version = "^23.12.1"}
+black = {extras = ["jupyter"], version = "^24.3.0"}
 pre-commit = "^3.6.0"
 isort = "^5.13.2"
 flake9 = "^3.8.3.post2"
-pytest = ">=7.4.3,<10"
+pytest = ">=9.0.3,<10"
 shapely = "^2.0.2"
 worstcase = "^0.5.0"
 
