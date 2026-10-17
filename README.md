@@ -5,6 +5,9 @@ Estimate IV- and PV-curves given photovoltaic cell datasheet parameters. Capable
 
 `pip install solarcell`
 
+Requires Python 3.11 or newer. Supports NumPy 1.26 and 2.x; the test suite
+covers Python 3.11 through 3.15.
+
 ## Usage
 
 See the examples contained within this repository. Please also consider reading the related blog post, ["How To Estimate Complex Solar Array Power Curves".](https://www.osborneee.com/solarcell/)

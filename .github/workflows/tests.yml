@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        dependencies: [latest]
+        include:
+          - python: "3.11"
+            dependencies: minimum
+          - python: "3.11"
+            dependencies: numpy-2.0
+    name: Python ${{ matrix.python }} (${{ matrix.dependencies }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install latest compatible dependencies
+        if: matrix.dependencies == 'latest'
+        run: python -m pip install . "pytest>=7.4.3,<10"
+      - name: Install minimum dependencies
+        if: matrix.dependencies == 'minimum'
+        run: python -m pip install . numpy==1.26.2 scipy==1.11.4 pytest==7.4.3
+      - name: Install first NumPy 2 release
+        if: matrix.dependencies == 'numpy-2.0'
+        run: python -m pip install . numpy==2.0.0 scipy==1.13.0 "pytest>=7.4.3,<10"
+      - name: Test
+        run: python -m pytest -q

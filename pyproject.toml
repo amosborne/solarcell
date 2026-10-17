@@ -1,17 +1,24 @@
 [tool.poetry]
 name = "solarcell"
-version = "0.2.0"
+version = "0.2.1"
 description = "Estimate IV- and PV-curves given photovoltaic cell datasheet parameters."
 authors = ["Alexander Osborne <alex@osborneee.com>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/amosborne/solarcell"
-classifiers = ["Topic :: Scientific/Engineering"]
+classifiers = [
+    "Topic :: Scientific/Engineering",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
 keywords = ["solar", "photovoltaic"]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-numpy = "^1.26.2"
+numpy = ">=1.26.2,<3"
 scipy = "^1.11.4"
 
 [tool.poetry.group.dev.dependencies]
@@ -22,7 +29,7 @@ black = {extras = ["jupyter"], version = "^23.12.1"}
 pre-commit = "^3.6.0"
 isort = "^5.13.2"
 flake9 = "^3.8.3.post2"
-pytest = "^7.4.3"
+pytest = ">=7.4.3,<10"
 shapely = "^2.0.2"
 worstcase = "^0.5.0"
 
